@@ -41,7 +41,7 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,x86_64-linux-android
@@ -55,10 +55,14 @@ jobs:
       - name: Scaffold Android Runner Assets & Fetch Dart Dependencies
         working-directory: mobile
         run: |
+          rm -f android/settings.gradle.kts android/gradle/wrapper/gradle-wrapper.properties
           flutter create --no-pub --platforms=android --org dev.veloce --project-name veloce_mobile .
           rm -f test/widget_test.dart
           rm -f android/build.gradle android/settings.gradle android/app/build.gradle
           rm -rf android/app/src/main/kotlin/dev/veloce/veloce_mobile
+          if ! grep -q "kotlin.android" android/settings.gradle.kts; then
+            sed -i '/id("kotlin-android")/d' android/app/build.gradle.kts
+          fi
           flutter pub get
       - name: Generate flutter_rust_bridge bindings
         run: flutter_rust_bridge_codegen generate
@@ -91,6 +95,7 @@ jobs:
         run: |
           flutter create --no-pub --platforms=ios --org dev.veloce --project-name veloce_mobile .
           rm -f test/widget_test.dart
+          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*;/IPHONEOS_DEPLOYMENT_TARGET = 15.5;/g' ios/Runner.xcodeproj/project.pbxproj
           flutter pub get
       - name: Generate flutter_rust_bridge bindings
         run: flutter_rust_bridge_codegen generate
