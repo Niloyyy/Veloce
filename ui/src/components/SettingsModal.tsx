@@ -1,0 +1,180 @@
+import { FolderOpen, SlidersHorizontal, X } from "lucide-react";
+import { useState } from "react";
+import type { DesktopSettings } from "../types/veloce";
+
+interface SettingsModalProps {
+  settings: DesktopSettings;
+  saving: boolean;
+  onBrowseDownloadDir: () => Promise<string | null>;
+  onSave: (next: DesktopSettings) => Promise<void>;
+  onClose: () => void;
+}
+
+export function SettingsModal({
+  settings,
+  saving,
+  onBrowseDownloadDir,
+  onSave,
+  onClose,
+}: SettingsModalProps) {
+  const [deviceName, setDeviceName] = useState(settings.deviceName);
+  const [downloadDir, setDownloadDir] = useState(settings.downloadDir);
+  const [relayText, setRelayText] = useState(settings.relayAddrs.join(", "));
+  const [parallelStreams, setParallelStreams] = useState(settings.parallelStreams);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleBrowse = async () => {
+    const picked = await onBrowseDownloadDir();
+    if (picked) setDownloadDir(picked);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmedName = deviceName.trim();
+    if (!trimmedName) {
+      setError("Device name cannot be empty.");
+      return;
+    }
+    const relayAddrs = relayText
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    setError(null);
+    try {
+      await onSave({
+        deviceName: trimmedName,
+        downloadDir: downloadDir.trim() || settings.downloadDir,
+        relayAddrs,
+        parallelStreams,
+        theme: settings.theme,
+      });
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <div
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-modal-title"
+    >
+      <div className="modal-card modal-card-wide">
+        <div className="modal-header">
+          <div>
+            <span className="eyebrow">Node & Transfer Preferences</span>
+            <h2 id="settings-modal-title" className="settings-title-row">
+              <SlidersHorizontal size={18} />
+              <span>Settings</span>
+            </h2>
+          </div>
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label="Close settings"
+            onClick={onClose}
+            disabled={saving}
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <form className="settings-form" onSubmit={handleSubmit}>
+          <div className="field-group">
+            <label className="input-label" htmlFor="veloce-device-name">
+              Device Name
+            </label>
+            <input
+              id="veloce-device-name"
+              className="text-input"
+              type="text"
+              maxLength={64}
+              value={deviceName}
+              onChange={(e) => setDeviceName(e.target.value)}
+              placeholder="Advertised over mDNS and TLS handshake"
+            />
+          </div>
+
+          <div className="field-group">
+            <label className="input-label" htmlFor="veloce-download-dir">
+              Default Download Directory
+            </label>
+            <div className="dir-picker-row dir-picker-compact">
+              <span id="veloce-download-dir" className="muted-xs truncate" title={downloadDir}>
+                {downloadDir}
+              </span>
+              <button
+                className="btn-secondary btn-sm"
+                type="button"
+                onClick={handleBrowse}
+                disabled={saving}
+              >
+                <FolderOpen size={14} />
+                <span>Browse</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="field-group">
+            <label className="input-label" htmlFor="veloce-relay-addrs">
+              Relay Addresses (host:port)
+            </label>
+            <input
+              id="veloce-relay-addrs"
+              className="text-input text-input-mono"
+              type="text"
+              value={relayText}
+              onChange={(e) => setRelayText(e.target.value)}
+              placeholder="relay.example.com:7878, 203.0.113.10:7878"
+            />
+            <span className="field-hint">
+              Comma-separated DNS hostnames or IP:port hints for NAT traversal & blind E2EE relay
+              fallback. Saved locally in userData — no environment variables needed.
+            </span>
+          </div>
+
+          <div className="field-group">
+            <div className="range-header">
+              <label className="input-label" htmlFor="veloce-parallel-streams">
+                Parallel QUIC Streams
+              </label>
+              <span className="range-value">{parallelStreams} streams</span>
+            </div>
+            <input
+              id="veloce-parallel-streams"
+              className="range-input"
+              type="range"
+              min={1}
+              max={32}
+              step={1}
+              value={parallelStreams}
+              onChange={(e) => setParallelStreams(Number(e.target.value))}
+            />
+            <span className="field-hint">
+              Recommended: 8 for desktop LAN/WAN, 4 for low-power links, 16–32 for high-BDP fiber.
+            </span>
+          </div>
+
+          {error && <div className="inline-error">{error}</div>}
+
+          <div className="modal-actions">
+            <button
+              className="btn-secondary"
+              type="button"
+              onClick={onClose}
+              disabled={saving}
+            >
+              Cancel
+            </button>
+            <button className="btn-primary" type="submit" disabled={saving}>
+              {saving ? "Applying..." : "Save & Apply"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}

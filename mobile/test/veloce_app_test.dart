@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:veloce_mobile/src/models/veloce_models.dart';
+import 'package:veloce_mobile/src/services/platform_service.dart';
 import 'package:veloce_mobile/src/state/veloce_controller.dart';
 import 'package:veloce_mobile/src/utils/formatters.dart';
 import 'package:veloce_mobile/src/widgets/connection_badge.dart';
@@ -111,6 +112,18 @@ class FakeRustBridge implements VeloceRustBridge {
   @override
   void shutdown() {
     unawaited(events.close());
+  }
+}
+
+class RecordingPlatformService extends VelocePlatformService {
+  final List<List<String>> exportedBatches = [];
+
+  @override
+  Future<List<String>> exportToPublicDownloads(List<String> sourcePaths) async {
+    exportedBatches.add(sourcePaths);
+    return sourcePaths
+        .map((p) => 'Download/Veloce/${p.split('/').last}')
+        .toList(growable: false);
   }
 }
 
@@ -225,6 +238,37 @@ void main() {
 
     ctrl.pauseTransfer('t1');
     expect(fake.pausedIds, ['t1']);
+    ctrl.dispose();
+  });
+
+  test('VeloceController exports received completed transfers to public Downloads',
+      () async {
+    final fake = FakeRustBridge();
+    final platform = RecordingPlatformService();
+    final ctrl = VeloceController(
+      bridge: fake,
+      platformService: platform,
+      enableWakelock: false,
+    );
+
+    ctrl.handleEngineEvent(
+      const AppEventTransferCompleted(
+        transferId: 'rx1',
+        direction: 'receive',
+        totalBytes: 2048,
+        totalChunks: 2,
+        elapsedMs: 120,
+        averageSpeedBytesPerSec: 17000,
+        outputPaths: ['/data/user/0/dev.veloce.p2p/files/Veloce/clip.mp4'],
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(platform.exportedBatches, hasLength(1));
+    expect(
+      ctrl.transfers.single.outputPaths,
+      ['Download/Veloce/clip.mp4'],
+    );
     ctrl.dispose();
   });
 }

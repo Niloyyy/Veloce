@@ -1,0 +1,172 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-rust-binaries:
+    name: Rust CLI & Relay (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            archive: tar.gz
+            ext: ""
+          - os: windows-latest
+            target: windows-x64
+            archive: zip
+            ext: ".exe"
+          - os: macos-latest
+            target: macos-arm64
+            archive: tar.gz
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build veloce-cli & veloce-relay (release)
+        run: cargo build --release -p veloce-cli -p veloce-relay
+      - name: Package Unix archives
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist-assets
+          tar -C target/release -czf "dist-assets/veloce-${{ matrix.target }}.tar.gz" "veloce"
+          tar -C target/release -czf "dist-assets/veloce-relay-${{ matrix.target }}.tar.gz" "veloce-relay"
+      - name: Package Windows archives
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-assets | Out-Null
+          Compress-Archive -Path target/release/veloce.exe -DestinationPath "dist-assets/veloce-${{ matrix.target }}.zip" -Force
+          Compress-Archive -Path target/release/veloce-relay.exe -DestinationPath "dist-assets/veloce-relay-${{ matrix.target }}.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-binaries-${{ matrix.target }}
+          path: dist-assets/*
+          if-no-files-found: error
+
+  build-desktop-installers:
+    name: Electron Desktop (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            script: package:linux
+          - os: windows-latest
+            target: windows-x64
+            script: package:win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install UI dependencies & build native + Electron installers
+        working-directory: ui
+        run: |
+          npm ci
+          npm run ${{ matrix.script }}
+      - name: Collect Linux installers
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist-assets
+          cp ui/release/*.AppImage ui/release/*.deb dist-assets/
+      - name: Collect Windows installers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-assets | Out-Null
+          Get-ChildItem -Path ui/release -Filter *.exe | Copy-Item -Destination dist-assets/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-installers-${{ matrix.target }}
+          path: dist-assets/*
+          if-no-files-found: error
+
+  build-android-apk:
+    name: Android Release APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Install cargo-ndk & flutter_rust_bridge_codegen
+        run: |
+          cargo install cargo-ndk --locked
+          cargo install flutter_rust_bridge_codegen --version "^2.13" --locked
+      - name: Scaffold Android Runner & Fetch Dart Dependencies
+        working-directory: mobile
+        run: |
+          rm -f android/settings.gradle.kts android/gradle/wrapper/gradle-wrapper.properties
+          flutter create --no-pub --platforms=android --org dev.veloce --project-name veloce_mobile .
+          rm -f test/widget_test.dart
+          rm -f android/build.gradle android/settings.gradle android/app/build.gradle
+          rm -rf android/app/src/main/kotlin/dev/veloce/veloce_mobile
+          if ! grep -q "kotlin.android" android/settings.gradle.kts; then
+            sed -i '/id("kotlin-android")/d' android/app/build.gradle.kts
+          fi
+          flutter pub get
+      - name: Generate flutter_rust_bridge bindings
+        run: flutter_rust_bridge_codegen generate
+      - name: Build Android Rust Libraries (16 KB page aligned)
+        run: bash mobile/scripts/build-android-rust.sh release
+      - name: Build Android Release APK
+        working-directory: mobile
+        run: flutter build apk --release
+      - name: Stage APK artifact
+        run: |
+          mkdir -p dist-assets
+          cp mobile/build/app/outputs/flutter-apk/app-release.apk dist-assets/veloce-android-release.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-release-apk
+          path: dist-assets/veloce-android-release.apk
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release & SHA256SUMS
+    needs: [build-rust-binaries, build-desktop-installers, build-android-apk]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Generate SHA-256 Checksums
+        working-directory: release-assets
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Upload checksummed bundle (workflow_dispatch dry-run)
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: veloce-release-bundle
+          path: release-assets/*
+          retention-days: 14
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/*

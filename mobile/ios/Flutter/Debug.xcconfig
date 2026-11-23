@@ -1,0 +1,9 @@
+#include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"
+#include "Generated.xcconfig"
+
+// Explicitly force-load VeloceCore.xcframework (Rust core-mobile-ffi) and preserve
+// global C-ABI symbols so flutter_rust_bridge's DynamicLibrary.process() resolves
+// all `frbgen_*` and `frb_*` symbols reliably on physical iOS devices.
+DEAD_CODE_STRIPPING[sdk=iphoneos*] = NO
+STRIP_STYLE[sdk=iphoneos*] = non-global
+OTHER_LDFLAGS[sdk=iphoneos*] = $(inherited) -force_load "$(SRCROOT)/Frameworks/VeloceCore.xcframework/ios-arm64/libcore_mobile_ffi.a" -framework Security -framework SystemConfiguration -framework CoreFoundation -lresolv

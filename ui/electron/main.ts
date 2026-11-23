@@ -39,10 +39,93 @@ interface NativeAddon {
   parseTicket(ticketCode: string): string;
 }
 
+export interface DesktopSettings {
+  deviceName: string;
+  downloadDir: string;
+  relayAddrs: string[];
+  parallelStreams: number;
+  theme: "dark" | "light";
+}
+
 let mainWindow: BrowserWindow | null = null;
 let nativeAddon: NativeAddon | null = null;
 let client: NativeClient | null = null;
 let initError: string | null = null;
+let currentSettings: DesktopSettings = defaultSettings();
+
+function defaultSettings(): DesktopSettings {
+  const envRelays = (process.env.VELOCE_RELAY_ADDRS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  return {
+    deviceName: os.hostname() || "Veloce Desktop",
+    downloadDir: path.join(os.homedir(), "Downloads", "Veloce"),
+    relayAddrs: envRelays,
+    parallelStreams: 8,
+    theme: "dark",
+  };
+}
+
+function settingsFilePath(): string {
+  return path.join(app.getPath("userData"), "veloce-settings.json");
+}
+
+function sanitizeSettings(raw: Partial<DesktopSettings>, fallback: DesktopSettings): DesktopSettings {
+  const deviceName =
+    typeof raw.deviceName === "string" && raw.deviceName.trim().length > 0
+      ? raw.deviceName.trim().slice(0, 64)
+      : fallback.deviceName;
+  const downloadDir =
+    typeof raw.downloadDir === "string" && raw.downloadDir.trim().length > 0
+      ? raw.downloadDir.trim()
+      : fallback.downloadDir;
+  const relayAddrs = Array.isArray(raw.relayAddrs)
+    ? raw.relayAddrs
+        .filter((s): s is string => typeof s === "string")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : fallback.relayAddrs;
+  const rawStreams =
+    typeof raw.parallelStreams === "number" && Number.isFinite(raw.parallelStreams)
+      ? Math.round(raw.parallelStreams)
+      : fallback.parallelStreams;
+  const parallelStreams = Math.min(32, Math.max(1, rawStreams));
+  const theme: "dark" | "light" =
+    raw.theme === "light" || raw.theme === "dark" ? raw.theme : fallback.theme;
+
+  return {
+    deviceName,
+    downloadDir,
+    relayAddrs,
+    parallelStreams,
+    theme,
+  };
+}
+
+function loadPersistedSettings(): DesktopSettings {
+  const fallback = defaultSettings();
+  try {
+    const file = settingsFilePath();
+    if (!fs.existsSync(file)) {
+      return fallback;
+    }
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<DesktopSettings>;
+    return sanitizeSettings(parsed, fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+function savePersistedSettings(next: DesktopSettings): void {
+  const file = settingsFilePath();
+  const dir = path.dirname(file);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(next, null, 2), "utf8");
+  fs.renameSync(tmp, file);
+}
 
 function resolveNativeAddonPath(): string {
   const candidates = [
@@ -57,7 +140,36 @@ function resolveNativeAddonPath(): string {
   return candidates[0];
 }
 
+function buildStatusPayload() {
+  if (!client) {
+    return {
+      ready: false,
+      error: initError ?? "Engine initializing",
+      nodeInfo: null,
+      defaultOutputDir: currentSettings.downloadDir,
+      settings: currentSettings,
+    };
+  }
+  return {
+    ready: true,
+    error: null,
+    nodeInfo: JSON.parse(client.nodeInfoJson()),
+    defaultOutputDir: currentSettings.downloadDir,
+    settings: currentSettings,
+  };
+}
+
 async function initNativeEngine(): Promise<void> {
+  if (client) {
+    try {
+      client.shutdown();
+    } catch {
+      // Ignore shutdown errors during restart.
+    }
+    client = null;
+  }
+  initError = null;
+
   const addonPath = resolveNativeAddonPath();
   if (!fs.existsSync(addonPath)) {
     initError = `Native Rust addon not found at ${addonPath}. Run "npm run build:native" in /ui first.`;
@@ -65,20 +177,17 @@ async function initNativeEngine(): Promise<void> {
   }
 
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const loaded = require(addonPath) as NativeAddon;
-    nativeAddon = loaded;
+    if (!nativeAddon) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      nativeAddon = require(addonPath) as NativeAddon;
+    }
 
-    const relayEnv = (process.env.VELOCE_RELAY_ADDRS || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    const created = await loaded.VeloceNativeClient.create({
-      deviceName: os.hostname() || "Veloce Desktop",
+    const created = await nativeAddon.VeloceNativeClient.create({
+      deviceName: currentSettings.deviceName,
       enableMdns: true,
-      parallelStreams: 8,
-      relayAddrs: relayEnv.length > 0 ? relayEnv : undefined,
+      parallelStreams: currentSettings.parallelStreams,
+      relayAddrs:
+        currentSettings.relayAddrs.length > 0 ? currentSettings.relayAddrs : undefined,
     });
 
     created.onEvent((eventJson: string) => {
@@ -104,7 +213,7 @@ function createWindow(): void {
     minWidth: 820,
     minHeight: 620,
     title: "Veloce — P2P File Transfer",
-    backgroundColor: "#0c0f14",
+    backgroundColor: currentSettings.theme === "light" ? "#f4f6fa" : "#0c0f14",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -126,17 +235,39 @@ function createWindow(): void {
 }
 
 function registerIpcHandlers(): void {
-  ipcMain.handle("veloce:getStatus", () => {
-    if (!client) {
-      return { ready: false, error: initError ?? "Engine initializing", nodeInfo: null };
-    }
-    return {
-      ready: true,
-      error: null,
-      nodeInfo: JSON.parse(client.nodeInfoJson()),
-      defaultOutputDir: path.join(os.homedir(), "Downloads", "Veloce"),
-    };
-  });
+  ipcMain.handle("veloce:getStatus", () => buildStatusPayload());
+
+  ipcMain.handle("veloce:getSettings", () => currentSettings);
+
+  ipcMain.handle(
+    "veloce:updateSettings",
+    async (_event, partial: Partial<DesktopSettings>) => {
+      const prev = currentSettings;
+      const next = sanitizeSettings(partial, prev);
+      const needsRestart =
+        next.deviceName !== prev.deviceName ||
+        next.parallelStreams !== prev.parallelStreams ||
+        JSON.stringify(next.relayAddrs) !== JSON.stringify(prev.relayAddrs);
+
+      currentSettings = next;
+      try {
+        savePersistedSettings(next);
+      } catch (err) {
+        throw new Error(
+          `Failed to persist settings: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      if (needsRestart) {
+        await initNativeEngine();
+      }
+
+      return {
+        settings: currentSettings,
+        status: buildStatusPayload(),
+      };
+    },
+  );
 
   ipcMain.handle("veloce:pickFiles", async () => {
     if (!mainWindow) return [];
@@ -172,10 +303,16 @@ function registerIpcHandlers(): void {
       args: { paths: string[]; targetPeerNodeId?: string; relayHints?: string[] },
     ) => {
       if (!client) throw new Error(initError ?? "Engine not ready");
+      const relayHints =
+        args.relayHints && args.relayHints.length > 0
+          ? args.relayHints
+          : currentSettings.relayAddrs.length > 0
+            ? currentSettings.relayAddrs
+            : null;
       const json = await client.startSession(
         args.paths,
         args.targetPeerNodeId ?? null,
-        args.relayHints ?? null,
+        relayHints,
       );
       return JSON.parse(json);
     },
@@ -190,8 +327,8 @@ function registerIpcHandlers(): void {
       if (!client) throw new Error(initError ?? "Engine not ready");
       const json = await client.joinSession(
         args.ticketCode,
-        args.outputDir,
-        args.parallelStreams ?? 8,
+        args.outputDir || currentSettings.downloadDir,
+        args.parallelStreams ?? currentSettings.parallelStreams,
       );
       return JSON.parse(json);
     },
@@ -211,7 +348,10 @@ function registerIpcHandlers(): void {
     "veloce:acceptIncoming",
     (_event, args: { transferId: string; outputDir: string }) => {
       if (!client) throw new Error(initError ?? "Engine not ready");
-      client.acceptIncomingTransfer(args.transferId, args.outputDir);
+      client.acceptIncomingTransfer(
+        args.transferId,
+        args.outputDir || currentSettings.downloadDir,
+      );
       return { ok: true };
     },
   );
@@ -242,6 +382,7 @@ function registerIpcHandlers(): void {
 }
 
 app.whenReady().then(async () => {
+  currentSettings = loadPersistedSettings();
   await initNativeEngine();
   registerIpcHandlers();
   createWindow();

@@ -76,6 +76,13 @@ jobs:
       - name: Build Android APK
         working-directory: mobile
         run: flutter build apk --release
+      - name: Upload Android Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: veloce-android-release-apk
+          path: mobile/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
 
   ios:
     name: Flutter iOS + Rust core-mobile-ffi (aarch64-apple-ios)
@@ -109,3 +116,11 @@ jobs:
       - name: Build iOS (no-codesign)
         working-directory: mobile
         run: flutter build ios --release --no-codesign
+      - name: Verify Rust FFI Symbols Linked in iOS Runner Binary
+        working-directory: mobile
+        run: |
+          RUNNER_BIN="build/ios/iphoneos/Runner.app/Runner"
+          test -f "${RUNNER_BIN}"
+          nm -gU "${RUNNER_BIN}" | grep -E "veloce_core_ios_anchor|frb_pde_ffi_dispatcher|frb_get_rust_content_hash|frbgen_" | head -n 20
+          nm -gU "${RUNNER_BIN}" | grep -q "veloce_core_ios_anchor"
+          nm -gU "${RUNNER_BIN}" | grep -qE "frb_pde_ffi_dispatcher|frb_get_rust_content_hash|frbgen_"

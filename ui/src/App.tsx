@@ -1,10 +1,20 @@
-import { ArrowDownLeft, ArrowUpRight, Moon, Shield, Sun, Zap } from "lucide-react";
+import {
+  ArrowDownLeft,
+  ArrowUpRight,
+  Moon,
+  Shield,
+  SlidersHorizontal,
+  Sun,
+  Zap,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { IncomingOfferModal } from "./components/IncomingOfferModal";
 import { ReceiveView } from "./components/ReceiveView";
 import { SendView } from "./components/SendView";
+import { SettingsModal } from "./components/SettingsModal";
 import { TransferCard } from "./components/TransferCard";
 import type {
+  DesktopSettings,
   EngineEvent,
   EngineStatus,
   IncomingOfferEvent,
@@ -20,6 +30,15 @@ export function App() {
   const [tab, setTab] = useState<ActiveTab>("send");
   const [theme, setTheme] = useState<ThemeMode>("dark");
   const [status, setStatus] = useState<EngineStatus | null>(null);
+  const [settings, setSettings] = useState<DesktopSettings>({
+    deviceName: "Veloce Desktop",
+    downloadDir: "",
+    relayAddrs: [],
+    parallelStreams: 8,
+    theme: "dark",
+  });
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
   const [peers, setPeers] = useState<PeerDto[]>([]);
   const [outputDir, setOutputDir] = useState<string>("");
   const [activeSession, setActiveSession] = useState<StartSessionResult | null>(null);
@@ -47,7 +66,13 @@ export function App() {
     (async () => {
       const s = await window.veloce!.getStatus();
       setStatus(s);
-      if (s.defaultOutputDir) setOutputDir(s.defaultOutputDir);
+      if (s.settings) {
+        setSettings(s.settings);
+        setTheme(s.settings.theme);
+        setOutputDir(s.settings.downloadDir);
+      } else if (s.defaultOutputDir) {
+        setOutputDir(s.defaultOutputDir);
+      }
 
       const initialPeers = await window.veloce!.listLocalPeers();
       setPeers(initialPeers);
@@ -197,7 +222,11 @@ export function App() {
     setBusy(true);
     setBannerError(null);
     try {
-      const res = await window.veloce!.startSession({ paths, targetPeerNodeId });
+      const res = await window.veloce!.startSession({
+        paths,
+        targetPeerNodeId,
+        relayHints: settings.relayAddrs.length > 0 ? settings.relayAddrs : undefined,
+      });
       setActiveSession(res);
       if (targetPeerNodeId) {
         const label =
@@ -236,7 +265,7 @@ export function App() {
       const res = await window.veloce!.joinSession({
         ticketCode,
         outputDir,
-        parallelStreams: 8,
+        parallelStreams: settings.parallelStreams,
       });
       setTransfers((prev) => ({
         ...prev,
@@ -265,6 +294,29 @@ export function App() {
   const handleChooseOutputDir = async () => {
     const dir = await window.veloce?.pickOutputDir();
     if (dir) setOutputDir(dir);
+  };
+
+  const handleToggleTheme = () => {
+    const nextTheme: ThemeMode = theme === "dark" ? "light" : "dark";
+    setTheme(nextTheme);
+    setSettings((prev) => ({ ...prev, theme: nextTheme }));
+    void window.veloce?.updateSettings({ theme: nextTheme });
+  };
+
+  const handleSaveSettings = async (next: DesktopSettings) => {
+    if (!window.veloce) return;
+    setSavingSettings(true);
+    setBannerError(null);
+    try {
+      const result = await window.veloce.updateSettings(next);
+      setSettings(result.settings);
+      setStatus(result.status);
+      setOutputDir(result.settings.downloadDir);
+      const refreshedPeers = await window.veloce.listLocalPeers();
+      setPeers(refreshedPeers);
+    } finally {
+      setSavingSettings(false);
+    }
   };
 
   const handleAcceptOffer = async () => {
@@ -341,9 +393,19 @@ export function App() {
             className="icon-btn"
             type="button"
             aria-label="Toggle dark or light theme"
-            onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+            title="Toggle theme"
+            onClick={handleToggleTheme}
           >
             {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+          </button>
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label="Open settings"
+            title="Settings"
+            onClick={() => setSettingsOpen(true)}
+          >
+            <SlidersHorizontal size={16} />
           </button>
         </div>
       </header>
@@ -431,6 +493,16 @@ export function App() {
           onChangeOutputDir={handleChooseOutputDir}
           onAccept={handleAcceptOffer}
           onReject={handleRejectOffer}
+        />
+      )}
+
+      {settingsOpen && (
+        <SettingsModal
+          settings={settings}
+          saving={savingSettings}
+          onBrowseDownloadDir={async () => (await window.veloce?.pickOutputDir()) ?? null}
+          onSave={handleSaveSettings}
+          onClose={() => setSettingsOpen(false)}
         />
       )}
     </div>

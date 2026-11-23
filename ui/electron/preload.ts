@@ -2,6 +2,14 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 const veloceApi = {
   getStatus: () => ipcRenderer.invoke("veloce:getStatus"),
+  getSettings: () => ipcRenderer.invoke("veloce:getSettings"),
+  updateSettings: (settings: {
+    deviceName?: string;
+    downloadDir?: string;
+    relayAddrs?: string[];
+    parallelStreams?: number;
+    theme?: "dark" | "light";
+  }) => ipcRenderer.invoke("veloce:updateSettings", settings),
   pickFiles: () => ipcRenderer.invoke("veloce:pickFiles"),
   pickFolders: () => ipcRenderer.invoke("veloce:pickFolders"),
   pickOutputDir: () => ipcRenderer.invoke("veloce:pickOutputDir"),

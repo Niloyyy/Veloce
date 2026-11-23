@@ -8,11 +8,25 @@ export interface NodeInfo {
   listenPort: number;
 }
 
+export interface DesktopSettings {
+  deviceName: string;
+  downloadDir: string;
+  relayAddrs: string[];
+  parallelStreams: number;
+  theme: "dark" | "light";
+}
+
 export interface EngineStatus {
   ready: boolean;
   error: string | null;
   nodeInfo: NodeInfo | null;
   defaultOutputDir?: string;
+  settings?: DesktopSettings;
+}
+
+export interface UpdateSettingsResult {
+  settings: DesktopSettings;
+  status: EngineStatus;
 }
 
 export interface PeerDto {
@@ -142,6 +156,10 @@ export interface TransferRecord {
 
 export interface VeloceBridgeApi {
   getStatus: () => Promise<EngineStatus>;
+  getSettings: () => Promise<DesktopSettings>;
+  updateSettings: (
+    settings: Partial<DesktopSettings>,
+  ) => Promise<UpdateSettingsResult>;
   pickFiles: () => Promise<string[]>;
   pickFolders: () => Promise<string[]>;
   pickOutputDir: () => Promise<string | null>;

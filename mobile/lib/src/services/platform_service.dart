@@ -63,4 +63,22 @@ class VelocePlatformService {
       return const [];
     }
   }
+
+  /// Copies/moves completed verified transfers out of Android app-private sandbox storage
+  /// into user-visible `Downloads/Veloce` via MediaStore (Android 10+) or public Downloads.
+  /// Safe no-op on iOS (which exposes `Documents/Veloce` directly in Files) and tests.
+  Future<List<String>> exportToPublicDownloads(List<String> sourcePaths) async {
+    if (sourcePaths.isEmpty) return const [];
+    try {
+      final exported = await _channel.invokeListMethod<String>(
+        'exportToPublicDownloads',
+        {'paths': sourcePaths},
+      );
+      return exported ?? sourcePaths;
+    } on MissingPluginException {
+      return sourcePaths;
+    } on PlatformException {
+      return sourcePaths;
+    }
+  }
 }

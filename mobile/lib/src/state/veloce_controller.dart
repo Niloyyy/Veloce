@@ -178,7 +178,11 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<String> _resolveDownloadDir() async {
     try {
-      if (_settings.exportToDownloads) {
+      // On iOS, ApplicationDocumentsDirectory/Veloce is directly exposed in the iOS Files
+      // app via UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace.
+      // On Android, verified chunks write to app-private storage first (for POSIX pwrite
+      // & resume bitfields), then export to public Downloads/Veloce via MediaStore on completion.
+      if (!Platform.isIOS && _settings.exportToDownloads) {
         final downloads = await getDownloadsDirectory();
         if (downloads != null) {
           final dir = Directory('${downloads.path}/Veloce');
@@ -485,6 +489,11 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           connectionType: existing?.connectionType ?? 'LAN',
           outputPaths: outputPaths,
         );
+        if (direction == 'receive' &&
+            _settings.exportToDownloads &&
+            outputPaths.isNotEmpty) {
+          unawaited(_exportCompletedTransfer(transferId, outputPaths));
+        }
       case AppEventTransferFailed(:final transferId, :final direction, :final error):
         final existing = _transfers[transferId];
         final isCancel = error.toLowerCase().contains('cancel');
@@ -512,6 +521,18 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
 
     unawaited(_syncActiveTransferGuards());
     notifyListeners();
+  }
+
+  Future<void> _exportCompletedTransfer(
+    String transferId,
+    List<String> outputPaths,
+  ) async {
+    final exported = await _platform.exportToPublicDownloads(outputPaths);
+    final current = _transfers[transferId];
+    if (current != null && exported.isNotEmpty) {
+      _transfers[transferId] = current.copyWith(outputPaths: exported);
+      notifyListeners();
+    }
   }
 
   Future<void> _syncActiveTransferGuards() async {

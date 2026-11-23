@@ -7,9 +7,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const uiRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(uiRoot, "..");
 const isRelease = process.argv.includes("--release");
+const isOffline =
+  process.argv.includes("--offline") || process.env.CARGO_NET_OFFLINE === "true";
 const profile = isRelease ? "release" : "debug";
 
-const cargoArgs = ["build", "-p", "core-ffi", "--features", "napi-addon", "--offline"];
+const cargoArgs = ["build", "-p", "core-ffi", "--features", "napi-addon"];
+if (isOffline) {
+  cargoArgs.push("--offline");
+}
 if (isRelease) {
   cargoArgs.push("--release");
 }
