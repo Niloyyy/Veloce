@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
-import '../rust/api.dart';
+import '../models/veloce_models.dart';
 import '../state/veloce_controller.dart';
 import '../utils/formatters.dart';
 
@@ -18,7 +18,7 @@ class ReceiveTab extends StatefulWidget {
 
 class _ReceiveTabState extends State<ReceiveTab> {
   final TextEditingController _ticketController = TextEditingController();
-  MobileTicketPreview? _preview;
+  AppTicketPreview? _preview;
   String? _parseError;
   Timer? _debounce;
 

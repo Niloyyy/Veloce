@@ -6,7 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
-import '../rust/api.dart';
+import '../models/veloce_models.dart';
 import '../services/platform_service.dart';
 
 enum TransferStatus { active, paused, completed, failed, cancelled }
@@ -130,28 +130,28 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     themeMode: ThemeMode.dark,
   );
 
-  MobileNodeInfo? _nodeInfo;
+  AppNodeInfo? _nodeInfo;
   String? _initError;
   bool _busy = false;
-  final Map<String, MobilePeer> _peers = {};
+  final Map<String, AppPeer> _peers = {};
   final Map<String, TransferItem> _transfers = {};
-  MobileStartSessionResult? _activeSession;
-  MobileEventIncomingOffer? _pendingOffer;
-  StreamSubscription<MobileEngineEvent>? _eventSub;
+  AppStartSessionResult? _activeSession;
+  AppEventIncomingOffer? _pendingOffer;
+  StreamSubscription<AppEngineEvent>? _eventSub;
   bool _foregroundServiceActive = false;
 
   VeloceSettings get settings => _settings;
-  MobileNodeInfo? get nodeInfo => _nodeInfo;
+  AppNodeInfo? get nodeInfo => _nodeInfo;
   String? get initError => _initError;
   bool get busy => _busy;
   bool get isReady => _nodeInfo != null && _initError == null;
-  List<MobilePeer> get peers => _peers.values.toList(growable: false);
+  List<AppPeer> get peers => _peers.values.toList(growable: false);
   List<TransferItem> get transfers =>
       _transfers.values.toList(growable: false).reversed.toList(growable: false);
   int get activeTransferCount =>
       _transfers.values.where((t) => t.status == TransferStatus.active).length;
-  MobileStartSessionResult? get activeSession => _activeSession;
-  MobileEventIncomingOffer? get pendingOffer => _pendingOffer;
+  AppStartSessionResult? get activeSession => _activeSession;
+  AppEventIncomingOffer? get pendingOffer => _pendingOffer;
 
   Future<void> initialize() async {
     WidgetsBinding.instance.addObserver(this);
@@ -213,7 +213,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
         deviceName: _settings.deviceName,
         downloadDir: downloadDir,
         relayAddrs: relays,
-        profile: MobileTransferProfile.mobile,
+        profile: AppTransferProfile.mobile,
         overrideLanAddrs: wifiAddrs,
       );
 
@@ -298,7 +298,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  MobileTicketPreview parseTicket(String code) {
+  AppTicketPreview parseTicket(String code) {
     return _bridge.parseTicket(ticketCode: code);
   }
 
@@ -404,20 +404,20 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   @visibleForTesting
-  void handleEngineEvent(MobileEngineEvent event) {
+  void handleEngineEvent(AppEngineEvent event) {
     switch (event) {
-      case MobileEventPeerDiscovered(:final peer):
+      case AppEventPeerDiscovered(:final peer):
         _peers[peer.nodeId] = peer;
-      case MobileEventPeerLost(:final nodeId):
+      case AppEventPeerLost(:final nodeId):
         _peers.remove(nodeId);
-      case MobileEventIncomingOffer():
+      case AppEventIncomingOffer():
         _pendingOffer = event;
-      case MobileEventConnectionTypeChanged(:final transferId, :final connectionType):
+      case AppEventConnectionTypeChanged(:final transferId, :final connectionType):
         final existing = _transfers[transferId];
         if (existing != null) {
           _transfers[transferId] = existing.copyWith(connectionType: connectionType);
         }
-      case MobileEventTransferProgress(
+      case AppEventTransferProgress(
           :final transferId,
           :final direction,
           :final bytesTransferred,
@@ -445,7 +445,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           etaSeconds: etaSeconds,
           connectionType: connectionType,
         );
-      case MobileEventTransferPaused(:final transferId):
+      case AppEventTransferPaused(:final transferId):
         final existing = _transfers[transferId];
         if (existing != null) {
           _transfers[transferId] = existing.copyWith(
@@ -454,7 +454,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
             etaSeconds: 0,
           );
         }
-      case MobileEventTransferResumed(:final transferId):
+      case AppEventTransferResumed(:final transferId):
         final existing = _transfers[transferId];
         if (existing != null) {
           _transfers[transferId] = existing.copyWith(
@@ -462,7 +462,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
             clearError: true,
           );
         }
-      case MobileEventTransferCompleted(
+      case AppEventTransferCompleted(
           :final transferId,
           :final direction,
           :final totalBytes,
@@ -485,7 +485,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           connectionType: existing?.connectionType ?? 'LAN',
           outputPaths: outputPaths,
         );
-      case MobileEventTransferFailed(:final transferId, :final direction, :final error):
+      case AppEventTransferFailed(:final transferId, :final direction, :final error):
         final existing = _transfers[transferId];
         final isCancel = error.toLowerCase().contains('cancel');
         _transfers[transferId] = (existing ??

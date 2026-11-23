@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 
-import 'src/rust/frb_generated.dart';
 import 'src/screens/receive_tab.dart';
 import 'src/screens/send_tab.dart';
 import 'src/screens/transfers_tab.dart';
+import 'src/services/frb_rust_bridge.dart';
 import 'src/state/veloce_controller.dart';
 import 'src/widgets/incoming_offer_sheet.dart';
 import 'src/widgets/settings_sheet.dart';
@@ -32,7 +32,7 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
   void initState() {
     super.initState();
     _ownsController = widget.controller == null;
-    _controller = widget.controller ?? VeloceController(bridge: VeloceRustLib.instance);
+    _controller = widget.controller ?? VeloceController(bridge: FrbVeloceBridge.instance);
     _controller.addListener(_onControllerChanged);
     if (_ownsController) {
       _controller.initialize();
@@ -81,7 +81,7 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
     return ListenableBuilder(
       listenable: _controller,
       builder: (context, _) {
-        final seed = const Color(0xFF3B82F6);
+        const seed = Color(0xFF3B82F6);
         return MaterialApp(
           title: 'Veloce',
           debugShowCheckedModeBanner: false,

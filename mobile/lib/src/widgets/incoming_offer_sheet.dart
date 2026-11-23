@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../rust/api.dart';
+import '../models/veloce_models.dart';
 import '../utils/formatters.dart';
 import 'connection_badge.dart';
 
@@ -12,7 +12,7 @@ class IncomingOfferSheet extends StatelessWidget {
     required this.onReject,
   });
 
-  final MobileEventIncomingOffer offer;
+  final AppEventIncomingOffer offer;
   final VoidCallback onAccept;
   final VoidCallback onReject;
 

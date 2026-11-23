@@ -4,7 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 
-import '../rust/api.dart';
+import '../models/veloce_models.dart';
 import '../state/veloce_controller.dart';
 import '../utils/formatters.dart';
 
@@ -32,7 +32,7 @@ class _SendTabState extends State<SendTab> {
     await widget.controller.startSession(paths, targetPeerNodeId: targetPeer);
   }
 
-  Future<void> _sendToLanPeer(MobilePeer peer) async {
+  Future<void> _sendToLanPeer(AppPeer peer) async {
     if (_selectedPaths.isEmpty) {
       await _pickAndHost(targetPeer: peer.nodeId);
       return;

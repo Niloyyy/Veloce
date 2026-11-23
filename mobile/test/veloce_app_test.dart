@@ -2,14 +2,14 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:veloce_mobile/src/rust/api.dart';
+import 'package:veloce_mobile/src/models/veloce_models.dart';
 import 'package:veloce_mobile/src/state/veloce_controller.dart';
 import 'package:veloce_mobile/src/utils/formatters.dart';
 import 'package:veloce_mobile/src/widgets/connection_badge.dart';
 import 'package:veloce_mobile/src/widgets/transfer_card.dart';
 
 class FakeRustBridge implements VeloceRustBridge {
-  final StreamController<MobileEngineEvent> events = StreamController.broadcast();
+  final StreamController<AppEngineEvent> events = StreamController.broadcast();
   final List<String> pausedIds = [];
   final List<String> resumedIds = [];
 
@@ -17,14 +17,14 @@ class FakeRustBridge implements VeloceRustBridge {
   Future<void> initRuntime() async {}
 
   @override
-  Future<MobileNodeInfo> initMobileEngine({
+  Future<AppNodeInfo> initMobileEngine({
     required String deviceName,
     required String downloadDir,
     required List<String> relayAddrs,
-    required MobileTransferProfile profile,
+    required AppTransferProfile profile,
     required List<String> overrideLanAddrs,
   }) async {
-    return MobileNodeInfo(
+    return AppNodeInfo(
       nodeId: 'testnodeid',
       shortId: 'testnode',
       deviceName: deviceName,
@@ -35,15 +35,15 @@ class FakeRustBridge implements VeloceRustBridge {
   }
 
   @override
-  Stream<MobileEngineEvent> subscribeEvents() => events.stream;
+  Stream<AppEngineEvent> subscribeEvents() => events.stream;
 
   @override
-  Future<MobileStartSessionResult> startSession({
+  Future<AppStartSessionResult> startSession({
     required List<String> paths,
     String? targetPeerNodeId,
     required List<String> relayHints,
   }) async {
-    return const MobileStartSessionResult(
+    return const AppStartSessionResult(
       transferId: 'tr1',
       ticketCode: 'veloce1testcode',
       qrUri: 'veloce://veloce1testcode',
@@ -51,17 +51,17 @@ class FakeRustBridge implements VeloceRustBridge {
       totalChunks: 2,
       chunkSize: 1024,
       fileCount: 1,
-      files: [MobileFileSummary(relativePath: 'photo.jpg', size: 2048)],
+      files: [AppFileSummary(relativePath: 'photo.jpg', size: 2048)],
     );
   }
 
   @override
-  Future<MobileJoinSessionResult> joinSession({
+  Future<AppJoinSessionResult> joinSession({
     required String ticketCode,
     String? outputDir,
     int? parallelStreams,
   }) async {
-    return const MobileJoinSessionResult(
+    return const AppJoinSessionResult(
       transferId: 'tr2',
       totalSize: 4096,
       fileCount: 1,
@@ -69,8 +69,8 @@ class FakeRustBridge implements VeloceRustBridge {
   }
 
   @override
-  MobileTicketPreview parseTicket({required String ticketCode}) {
-    return const MobileTicketPreview(
+  AppTicketPreview parseTicket({required String ticketCode}) {
+    return const AppTicketPreview(
       transferId: 'tr2',
       senderNodeId: 'senderfull',
       senderShortId: 'sender12',
@@ -83,7 +83,7 @@ class FakeRustBridge implements VeloceRustBridge {
   }
 
   @override
-  List<MobilePeer> listLocalPeers() => const [];
+  List<AppPeer> listLocalPeers() => const [];
 
   @override
   void acceptIncomingTransfer({required String transferId, String? outputDir}) {}
@@ -94,14 +94,14 @@ class FakeRustBridge implements VeloceRustBridge {
   @override
   bool pauseTransfer({required String transferId}) {
     pausedIds.add(transferId);
-    events.add(MobileEventTransferPaused(transferId: transferId, direction: 'receive'));
+    events.add(AppEventTransferPaused(transferId: transferId, direction: 'receive'));
     return true;
   }
 
   @override
   Future<bool> resumeTransfer({required String transferId}) async {
     resumedIds.add(transferId);
-    events.add(MobileEventTransferResumed(transferId: transferId, direction: 'receive'));
+    events.add(AppEventTransferResumed(transferId: transferId, direction: 'receive'));
     return true;
   }
 
@@ -200,7 +200,7 @@ void main() {
     final ctrl = VeloceController(bridge: fake, enableWakelock: false);
 
     ctrl.handleEngineEvent(
-      const MobileEventTransferProgress(
+      const AppEventTransferProgress(
         transferId: 't1',
         direction: 'receive',
         bytesTransferred: 1024,
@@ -215,7 +215,7 @@ void main() {
     expect(ctrl.transfers.single.connectionType, 'Relayed');
 
     ctrl.handleEngineEvent(
-      const MobileEventConnectionTypeChanged(
+      const AppEventConnectionTypeChanged(
         transferId: 't1',
         peerNodeId: 'peer1',
         connectionType: 'Direct-P2P',

@@ -1,5 +1,6 @@
-// Typed Dart mirror of `core/core-mobile-ffi/src/api.rs`.
-// Regenerated alongside `frb_generated.dart` when `flutter_rust_bridge_codegen generate` runs.
+// Pre-codegen stub matching exact `flutter_rust_bridge` v2.13 generated API shapes.
+// Overwritten automatically by `flutter_rust_bridge_codegen generate`.
+// ignore_for_file: camel_case_types
 
 enum MobileTransferProfile {
   desktop,
@@ -47,7 +48,7 @@ class MobileFileSummary {
   });
 
   final String relativePath;
-  final int size;
+  final BigInt size;
 }
 
 class MobileStartSessionResult {
@@ -65,7 +66,7 @@ class MobileStartSessionResult {
   final String transferId;
   final String ticketCode;
   final String qrUri;
-  final int totalSize;
+  final BigInt totalSize;
   final int totalChunks;
   final int chunkSize;
   final int fileCount;
@@ -87,7 +88,7 @@ class MobileTicketPreview {
   final String transferId;
   final String senderNodeId;
   final String senderShortId;
-  final int totalSize;
+  final BigInt totalSize;
   final int fileCount;
   final List<String> directAddrs;
   final List<String> relayHints;
@@ -102,7 +103,7 @@ class MobileJoinSessionResult {
   });
 
   final String transferId;
-  final int totalSize;
+  final BigInt totalSize;
   final int fileCount;
 }
 
@@ -110,8 +111,8 @@ sealed class MobileEngineEvent {
   const MobileEngineEvent();
 }
 
-class MobileEventTransferProgress extends MobileEngineEvent {
-  const MobileEventTransferProgress({
+class MobileEngineEvent_TransferProgress extends MobileEngineEvent {
+  const MobileEngineEvent_TransferProgress({
     required this.transferId,
     required this.direction,
     required this.bytesTransferred,
@@ -125,8 +126,8 @@ class MobileEventTransferProgress extends MobileEngineEvent {
 
   final String transferId;
   final String direction;
-  final int bytesTransferred;
-  final int totalBytes;
+  final BigInt bytesTransferred;
+  final BigInt totalBytes;
   final int chunksVerified;
   final int totalChunks;
   final double speedBytesPerSec;
@@ -134,18 +135,18 @@ class MobileEventTransferProgress extends MobileEngineEvent {
   final String connectionType;
 }
 
-class MobileEventPeerDiscovered extends MobileEngineEvent {
-  const MobileEventPeerDiscovered({required this.peer});
+class MobileEngineEvent_PeerDiscovered extends MobileEngineEvent {
+  const MobileEngineEvent_PeerDiscovered({required this.peer});
   final MobilePeer peer;
 }
 
-class MobileEventPeerLost extends MobileEngineEvent {
-  const MobileEventPeerLost({required this.nodeId});
+class MobileEngineEvent_PeerLost extends MobileEngineEvent {
+  const MobileEngineEvent_PeerLost({required this.nodeId});
   final String nodeId;
 }
 
-class MobileEventIncomingOffer extends MobileEngineEvent {
-  const MobileEventIncomingOffer({
+class MobileEngineEvent_IncomingOffer extends MobileEngineEvent {
+  const MobileEngineEvent_IncomingOffer({
     required this.transferId,
     required this.senderNodeId,
     required this.senderShortId,
@@ -161,13 +162,13 @@ class MobileEventIncomingOffer extends MobileEngineEvent {
   final String senderShortId;
   final String senderName;
   final int fileCount;
-  final int totalSize;
+  final BigInt totalSize;
   final List<MobileFileSummary> files;
   final String connectionType;
 }
 
-class MobileEventConnectionTypeChanged extends MobileEngineEvent {
-  const MobileEventConnectionTypeChanged({
+class MobileEngineEvent_ConnectionTypeChanged extends MobileEngineEvent {
+  const MobileEngineEvent_ConnectionTypeChanged({
     required this.transferId,
     required this.peerNodeId,
     required this.connectionType,
@@ -178,8 +179,8 @@ class MobileEventConnectionTypeChanged extends MobileEngineEvent {
   final String connectionType;
 }
 
-class MobileEventTransferPaused extends MobileEngineEvent {
-  const MobileEventTransferPaused({
+class MobileEngineEvent_TransferPaused extends MobileEngineEvent {
+  const MobileEngineEvent_TransferPaused({
     required this.transferId,
     required this.direction,
   });
@@ -188,8 +189,8 @@ class MobileEventTransferPaused extends MobileEngineEvent {
   final String direction;
 }
 
-class MobileEventTransferResumed extends MobileEngineEvent {
-  const MobileEventTransferResumed({
+class MobileEngineEvent_TransferResumed extends MobileEngineEvent {
+  const MobileEngineEvent_TransferResumed({
     required this.transferId,
     required this.direction,
   });
@@ -198,8 +199,8 @@ class MobileEventTransferResumed extends MobileEngineEvent {
   final String direction;
 }
 
-class MobileEventTransferCompleted extends MobileEngineEvent {
-  const MobileEventTransferCompleted({
+class MobileEngineEvent_TransferCompleted extends MobileEngineEvent {
+  const MobileEngineEvent_TransferCompleted({
     required this.transferId,
     required this.direction,
     required this.totalBytes,
@@ -211,15 +212,15 @@ class MobileEventTransferCompleted extends MobileEngineEvent {
 
   final String transferId;
   final String direction;
-  final int totalBytes;
+  final BigInt totalBytes;
   final int totalChunks;
-  final int elapsedMs;
+  final BigInt elapsedMs;
   final double averageSpeedBytesPerSec;
   final List<String> outputPaths;
 }
 
-class MobileEventTransferFailed extends MobileEngineEvent {
-  const MobileEventTransferFailed({
+class MobileEngineEvent_TransferFailed extends MobileEngineEvent {
+  const MobileEngineEvent_TransferFailed({
     required this.transferId,
     required this.direction,
     required this.error,
@@ -230,52 +231,49 @@ class MobileEventTransferFailed extends MobileEngineEvent {
   final String error;
 }
 
-/// Abstract bridge contract implemented by generated `flutter_rust_bridge` bindings
-/// (and mockable in Flutter widget/unit tests).
-abstract class VeloceRustBridge {
-  Future<void> initRuntime();
+Never _unlinked() => throw UnsupportedError(
+      'Run `flutter_rust_bridge_codegen generate` to generate native FFI bindings.',
+    );
 
-  Future<MobileNodeInfo> initMobileEngine({
-    required String deviceName,
-    required String downloadDir,
-    required List<String> relayAddrs,
-    required MobileTransferProfile profile,
-    required List<String> overrideLanAddrs,
-  });
+Future<MobileNodeInfo> initMobileEngine({
+  required String deviceName,
+  required String downloadDir,
+  required List<String> relayAddrs,
+  required MobileTransferProfile profile,
+  required List<String> overrideLanAddrs,
+}) async =>
+    _unlinked();
 
-  Stream<MobileEngineEvent> subscribeEvents();
+Stream<MobileEngineEvent> subscribeEvents() => _unlinked();
 
-  Future<MobileStartSessionResult> startSession({
-    required List<String> paths,
-    String? targetPeerNodeId,
-    required List<String> relayHints,
-  });
+Future<MobileStartSessionResult> startSession({
+  required List<String> paths,
+  String? targetPeerNodeId,
+  required List<String> relayHints,
+}) async =>
+    _unlinked();
 
-  Future<MobileJoinSessionResult> joinSession({
-    required String ticketCode,
-    String? outputDir,
-    int? parallelStreams,
-  });
+Future<MobileJoinSessionResult> joinSession({
+  required String ticketCode,
+  String? outputDir,
+  int? parallelStreams,
+}) async =>
+    _unlinked();
 
-  MobileTicketPreview parseTicket({required String ticketCode});
+MobileTicketPreview parseTicket({required String ticketCode}) => _unlinked();
 
-  List<MobilePeer> listLocalPeers();
+List<MobilePeer> listLocalPeers() => _unlinked();
 
-  void acceptIncomingTransfer({
-    required String transferId,
-    String? outputDir,
-  });
+void acceptIncomingTransfer({required String transferId, String? outputDir}) =>
+    _unlinked();
 
-  void rejectIncomingTransfer({
-    required String transferId,
-    String? reason,
-  });
+void rejectIncomingTransfer({required String transferId, String? reason}) =>
+    _unlinked();
 
-  bool pauseTransfer({required String transferId});
+bool pauseTransfer({required String transferId}) => _unlinked();
 
-  Future<bool> resumeTransfer({required String transferId});
+Future<bool> resumeTransfer({required String transferId}) async => _unlinked();
 
-  bool cancelTransfer({required String transferId});
+bool cancelTransfer({required String transferId}) => _unlinked();
 
-  void shutdown();
-}
+void shutdown() {}

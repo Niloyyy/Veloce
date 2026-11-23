@@ -390,22 +390,20 @@ pub async fn init_mobile_engine(
 
 /// Streams all real-time `MobileEngineEvent` updates directly to Dart without blocking the UI isolate.
 #[frb]
-pub fn subscribe_events(sink: StreamSink<MobileEngineEvent>) -> Result<(), String> {
+pub async fn subscribe_events(sink: StreamSink<MobileEngineEvent>) -> Result<(), String> {
     let state = active_state()?;
     let mut rx = state.engine.subscribe_events();
-    tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(evt) => {
-                    if sink.add(MobileEngineEvent::from(evt)).is_err() {
-                        break;
-                    }
+    loop {
+        match rx.recv().await {
+            Ok(evt) => {
+                if sink.add(MobileEngineEvent::from(evt)).is_err() {
+                    break;
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
             }
+            Err(broadcast::error::RecvError::Closed) => break,
+            Err(broadcast::error::RecvError::Lagged(_)) => {}
         }
-    });
+    }
     Ok(())
 }
 
