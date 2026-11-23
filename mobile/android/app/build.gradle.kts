@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "dev.veloce.p2p"
-    compileSdk = 35
+    compileSdk = maxOf(35, flutter.compileSdkVersion)
 
     defaultConfig {
         applicationId = "dev.veloce.p2p"
