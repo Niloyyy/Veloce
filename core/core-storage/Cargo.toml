@@ -1,0 +1,22 @@
+[package]
+name = "core-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "BLAKE3 Merkle chunking, zero-copy file I/O, deduplication, and resumable assembly for Veloce"
+
+[dependencies]
+blake3.workspace = true
+core-protocol = { path = "../core-protocol" }
+hex.workspace = true
+memmap2.workspace = true
+postcard.workspace = true
+rand.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "rt", "sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

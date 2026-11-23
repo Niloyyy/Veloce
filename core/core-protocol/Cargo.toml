@@ -1,0 +1,19 @@
+[package]
+name = "core-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wire protocol, handshake state machine, and session tickets for Veloce P2P transfers"
+
+[dependencies]
+blake3.workspace = true
+bytes.workspace = true
+data-encoding.workspace = true
+hex.workspace = true
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util"] }

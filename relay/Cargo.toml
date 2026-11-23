@@ -1,0 +1,12 @@
+[package]
+name = "veloce-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal stateless UDP STUN, NAT hole-punching signaling, and blind encrypted relay server for Veloce"
+
+[dependencies]
+core-protocol = { path = "../core/core-protocol" }
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true

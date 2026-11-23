@@ -1,0 +1,17 @@
+[package]
+name = "veloce-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Benchmark comparing single-stream TCP vs multi-stream QUIC (BBR) under 100ms latency and 1% packet loss"
+
+[dependencies]
+blake3.workspace = true
+core-protocol = { path = "../core/core-protocol" }
+core-storage = { path = "../core/core-storage" }
+core-transport = { path = "../core/core-transport" }
+rand.workspace = true
+socket2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true

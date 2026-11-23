@@ -1,0 +1,31 @@
+[package]
+name = "core-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QUIC (BBR) multi-stream transport, Ed25519 mTLS identity, mDNS discovery, and NAT traversal for Veloce"
+
+[dependencies]
+blake3.workspace = true
+bytes.workspace = true
+core-protocol = { path = "../core-protocol" }
+core-storage = { path = "../core-storage" }
+hex.workspace = true
+if-addrs.workspace = true
+mdns-sd.workspace = true
+postcard.workspace = true
+quinn.workspace = true
+rand.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+serde.workspace = true
+socket2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+veloce-relay = { path = "../../relay" }

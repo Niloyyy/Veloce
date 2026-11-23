@@ -1,0 +1,19 @@
+[package]
+name = "veloce-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lightweight CLI for Veloce local & global QUIC (BBR) P2P file transfers"
+
+[[bin]]
+name = "veloce"
+path = "src/main.rs"
+
+[dependencies]
+core-ffi = { path = "../core/core-ffi", default-features = false }
+core-protocol = { path = "../core/core-protocol" }
+qrcode.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

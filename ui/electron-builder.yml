@@ -1,0 +1,44 @@
+appId: dev.veloce.p2p
+productName: Veloce
+copyright: Copyright © 2026 Veloce Contributors
+asar: true
+
+directories:
+  output: release
+
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+
+# Keep the compiled napi-rs native addon outside the ASAR archive so Node/Electron
+# can dlopen() it directly at `path.join(process.resourcesPath, "native", "veloce_core.node")`.
+extraResources:
+  - from: native/veloce_core.node
+    to: native/veloce_core.node
+
+linux:
+  category: Network
+  synopsis: High-performance Local & Global P2P File Transfer (QUIC BBR + BLAKE3)
+  maintainer: Veloce Contributors
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true

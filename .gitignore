@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+*.pdb
+Cargo.lock
+/ui/node_modules
+/ui/dist
+/ui/dist-electron
+/ui/release
+/ui/native/*.node
+*.veloce-resume*
+*.part
+.DS_Store
