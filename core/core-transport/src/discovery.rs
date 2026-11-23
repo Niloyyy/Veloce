@@ -110,34 +110,55 @@ pub fn local_lan_addrs_with_overrides(port: u16, overrides: &[IpAddr]) -> Vec<So
         }
     }
 
-    let mut enumerated_any = false;
-    if let Ok(ifaces) = getifs::interfaces() {
-        for iface in ifaces {
-            let name = iface.name().as_str();
-            let Ok(addrs) = iface.addrs() else {
-                continue;
-            };
-            for ifnet in addrs {
-                let ip = ifnet.addr();
-                let Some(prio) = classify_interface_priority(name, ip) else {
+    #[cfg(not(target_os = "ios"))]
+    {
+        let mut enumerated_any = false;
+        if let Ok(ifaces) = getifs::interfaces() {
+            for iface in ifaces {
+                let name = iface.name().as_str();
+                let Ok(addrs) = iface.addrs() else {
                     continue;
                 };
-                enumerated_any = true;
-                let sock = SocketAddr::new(ip, port);
-                if !ranked.iter().any(|(_, existing)| *existing == sock) {
-                    ranked.push((prio, sock));
+                for ifnet in addrs {
+                    let ip = ifnet.addr();
+                    let Some(prio) = classify_interface_priority(name, ip) else {
+                        continue;
+                    };
+                    enumerated_any = true;
+                    let sock = SocketAddr::new(ip, port);
+                    if !ranked.iter().any(|(_, existing)| *existing == sock) {
+                        ranked.push((prio, sock));
+                    }
+                }
+            }
+        }
+
+        // Android API 30+ fallback: if RTM_GETLINK interface enumeration failed or returned empty,
+        // query routed local addresses directly via `getifs::local_addrs()`.
+        if !enumerated_any {
+            if let Ok(addrs) = getifs::local_addrs() {
+                for ifnet in addrs {
+                    let ip = ifnet.addr();
+                    let Some(prio) = classify_interface_priority("wlan0", ip) else {
+                        continue;
+                    };
+                    let sock = SocketAddr::new(ip, port);
+                    if !ranked.iter().any(|(_, existing)| *existing == sock) {
+                        ranked.push((prio, sock));
+                    }
                 }
             }
         }
     }
 
-    // Android API 30+ fallback: if RTM_GETLINK interface enumeration failed or returned empty,
-    // query routed local addresses directly via `getifs::local_addrs()`.
-    if !enumerated_any {
-        if let Ok(addrs) = getifs::local_addrs() {
-            for ifnet in addrs {
-                let ip = ifnet.addr();
-                let Some(prio) = classify_interface_priority("wlan0", ip) else {
+    // iOS omits BSD routing-socket `libc::rt_msghdr`/`RTM_*` constants used by `getifs`,
+    // whereas Apple's POSIX `getifaddrs(3)` via `if-addrs` works natively on iOS.
+    #[cfg(target_os = "ios")]
+    {
+        if let Ok(ifaces) = if_addrs::get_if_addrs() {
+            for iface in ifaces {
+                let ip = iface.ip();
+                let Some(prio) = classify_interface_priority(&iface.name, ip) else {
                     continue;
                 };
                 let sock = SocketAddr::new(ip, port);

@@ -11,7 +11,6 @@ bytes.workspace = true
 core-protocol = { path = "../core-protocol" }
 core-storage = { path = "../core-storage" }
 hex.workspace = true
-getifs.workspace = true
 mdns-sd.workspace = true
 postcard.workspace = true
 quinn.workspace = true
@@ -25,6 +24,12 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 x509-parser.workspace = true
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+getifs.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+if-addrs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -62,8 +62,6 @@ jobs:
       - name: Generate flutter_rust_bridge bindings
         run: flutter_rust_bridge_codegen generate
       - name: Build Android Rust Libraries (16 KB page aligned)
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
         run: bash mobile/scripts/build-android-rust.sh release
       - name: Flutter Analyze & Test
         working-directory: mobile
