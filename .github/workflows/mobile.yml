@@ -73,9 +73,30 @@ jobs:
         run: |
           flutter analyze --no-fatal-infos
           flutter test
-      - name: Build Android APK
+      - name: Build & Verify Signed Android APK
         working-directory: mobile
-        run: flutter build apk --release
+        env:
+          VELOCE_KEYSTORE_BASE64: ${{ secrets.VELOCE_KEYSTORE_BASE64 }}
+          VELOCE_KEYSTORE_PASSWORD: ${{ secrets.VELOCE_KEYSTORE_PASSWORD }}
+          VELOCE_KEY_ALIAS: ${{ secrets.VELOCE_KEY_ALIAS }}
+          VELOCE_KEY_PASSWORD: ${{ secrets.VELOCE_KEY_PASSWORD }}
+        run: |
+          if [ -n "${VELOCE_KEYSTORE_BASE64:-}" ]; then
+            echo "${VELOCE_KEYSTORE_BASE64}" | base64 --decode > /tmp/veloce-release.jks
+            export VELOCE_KEYSTORE_PATH="/tmp/veloce-release.jks"
+            trap 'rm -f /tmp/veloce-release.jks' EXIT
+            echo "[veloce] Signing APK with configured release keystore"
+          else
+            echo "[veloce] Release keystore secrets not set; signing preview APK with debug key"
+          fi
+          flutter build apk --release
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          APKSIGNER="$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" -maxdepth 2 -name apksigner 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [ -n "${APKSIGNER}" ]; then
+            "${APKSIGNER}" verify --verbose --print-certs "${APK}"
+          else
+            jarsigner -verify -verbose "${APK}"
+          fi
       - name: Upload Android Release APK
         uses: actions/upload-artifact@v4
         with:

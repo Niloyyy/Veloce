@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "description": "Veloce Cross-Platform Local & Global P2P File Transfer UI (Electron + React + napi-rs)",
+  "author": "Veloce Contributors <maintainers@veloce.dev>",
+  "homepage": "https://github.com/Niloyyy/Veloce",
   "main": "dist-electron/main.js",
   "scripts": {
     "build:native": "node scripts/build-native.mjs",

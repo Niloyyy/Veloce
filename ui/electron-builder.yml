@@ -20,7 +20,8 @@ extraResources:
 linux:
   category: Network
   synopsis: High-performance Local & Global P2P File Transfer (QUIC BBR + BLAKE3)
-  maintainer: Veloce Contributors
+  maintainer: Veloce Contributors <maintainers@veloce.dev>
+  artifactName: veloce-${version}-linux-${arch}.${ext}
   target:
     - target: AppImage
       arch:
@@ -39,6 +40,10 @@ win:
         - x64
 
 nsis:
+  artifactName: veloce-${version}-win-${arch}-setup.${ext}
   oneClick: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
+
+portable:
+  artifactName: veloce-${version}-win-${arch}-portable.${ext}

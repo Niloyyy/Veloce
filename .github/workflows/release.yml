@@ -74,6 +74,8 @@ jobs:
           node-version: "22"
       - name: Install UI dependencies & build native + Electron installers
         working-directory: ui
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: |
           npm ci
           npm run ${{ matrix.script }}
@@ -129,9 +131,30 @@ jobs:
         run: flutter_rust_bridge_codegen generate
       - name: Build Android Rust Libraries (16 KB page aligned)
         run: bash mobile/scripts/build-android-rust.sh release
-      - name: Build Android Release APK
+      - name: Build & Verify Signed Android Release APK
         working-directory: mobile
-        run: flutter build apk --release
+        env:
+          VELOCE_KEYSTORE_BASE64: ${{ secrets.VELOCE_KEYSTORE_BASE64 }}
+          VELOCE_KEYSTORE_PASSWORD: ${{ secrets.VELOCE_KEYSTORE_PASSWORD }}
+          VELOCE_KEY_ALIAS: ${{ secrets.VELOCE_KEY_ALIAS }}
+          VELOCE_KEY_PASSWORD: ${{ secrets.VELOCE_KEY_PASSWORD }}
+        run: |
+          if [ -n "${VELOCE_KEYSTORE_BASE64:-}" ]; then
+            echo "${VELOCE_KEYSTORE_BASE64}" | base64 --decode > /tmp/veloce-release.jks
+            export VELOCE_KEYSTORE_PATH="/tmp/veloce-release.jks"
+            trap 'rm -f /tmp/veloce-release.jks' EXIT
+            echo "[veloce] Signing release APK with configured release keystore"
+          else
+            echo "[veloce] Release keystore secrets not set; signing APK with debug key"
+          fi
+          flutter build apk --release
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          APKSIGNER="$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" -maxdepth 2 -name apksigner 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [ -n "${APKSIGNER}" ]; then
+            "${APKSIGNER}" verify --verbose --print-certs "${APK}"
+          else
+            jarsigner -verify -verbose "${APK}"
+          fi
       - name: Stage APK artifact
         run: |
           mkdir -p dist-assets
@@ -155,7 +178,8 @@ jobs:
       - name: Generate SHA-256 Checksums
         working-directory: release-assets
         run: |
-          sha256sum * > SHA256SUMS.txt
+          rm -f SHA256SUMS.txt
+          sha256sum -- * > SHA256SUMS.txt
           cat SHA256SUMS.txt
       - name: Upload checksummed bundle (workflow_dispatch dry-run)
         if: "!startsWith(github.ref, 'refs/tags/v')"

@@ -4,6 +4,16 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val releaseKeystorePath = System.getenv("VELOCE_KEYSTORE_PATH")
+val releaseKeystorePassword = System.getenv("VELOCE_KEYSTORE_PASSWORD")
+val releaseKeyAlias = System.getenv("VELOCE_KEY_ALIAS")
+val releaseKeyPassword = System.getenv("VELOCE_KEY_PASSWORD")
+val hasReleaseKeystore = !releaseKeystorePath.isNullOrBlank() &&
+    !releaseKeystorePassword.isNullOrBlank() &&
+    !releaseKeyAlias.isNullOrBlank() &&
+    !releaseKeyPassword.isNullOrBlank() &&
+    file(releaseKeystorePath).exists()
+
 android {
     namespace = "dev.veloce.p2p"
     compileSdk = maxOf(36, flutter.compileSdkVersion)
@@ -38,9 +48,26 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                storeFile = file(releaseKeystorePath!!)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("debug")
+            // Use CI/local release keystore when configured; otherwise fall back to debug
+            // signing so CI preview APKs are immediately sideloadable on Android devices.
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }

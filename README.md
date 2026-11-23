@@ -159,12 +159,12 @@ cargo run --release -p veloce-bench -- \
 To reproduce against real Linux kernel `netem` queueing disciplines (requires `sudo` + `iproute2`):
 
 ```bash
-sudo ./bench/run_netem_bench.sh 16 100 1.0
+sudo ./bench/run_netem_bench.sh 64 50 0.5
 ```
 
 | Scenario (`tc netem`) | Single-Stream TCP | Veloce QUIC (BBR, 8 streams) | Speedup |
 | :--- | :---: | :---: | :---: |
-| 16 MiB, 100 ms RTT, 1.0% loss (kernel `netem`) | _TBD (run on root Linux host)_ | _TBD (run on root Linux host)_ | _TBD_ |
+| 64 MiB, 100 ms RTT (`50 ms` × 2), 1.0% loss (`0.5%` × 2) | _TBD (run on root Linux host)_ | _TBD (run on root Linux host)_ | _TBD_ |
 
 ---
 
@@ -188,4 +188,4 @@ cd mobile && flutter analyze --no-fatal-infos && flutter test
 
 ## License
 
-Dual-licensed under **MIT** or **Apache-2.0** (see `Cargo.toml`).
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
