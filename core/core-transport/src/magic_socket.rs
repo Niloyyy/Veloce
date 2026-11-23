@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{ready, Context, Poll};
 
-use core_protocol::{ConnectionType, NodeId, SignalingMessage};
+use core_protocol::{ConnectionType, NodeId, SignalingMessage, TransferProfile};
 use quinn::udp::{RecvMeta, Transmit, UdpSocketState};
 use quinn::{AsyncUdpSocket, UdpPoller};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -22,9 +22,6 @@ use tokio::sync::{broadcast, mpsc};
 const VIRTUAL_IP_A: u8 = 198;
 const VIRTUAL_IP_B: u8 = 18;
 const VIRTUAL_PORT: u16 = 4433;
-
-/// Preferred OS UDP socket buffer sizes tried in descending order until accepted by the kernel.
-const UDP_BUFFER_SIZES: &[usize] = &[8 * 1024 * 1024, 4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024];
 
 /// Maximum encapsulated QUIC datagram accepted inside a `RelayForward` signaling envelope.
 const MAX_RELAY_FORWARD_PAYLOAD: usize = 2048;
@@ -54,14 +51,18 @@ struct RouteTable {
 
 /// Custom multiplexed UDP socket implementing `quinn::AsyncUdpSocket`.
 ///
-/// Optimized for gigabit LAN throughput and seamless WAN NAT traversal:
-/// - Configures large OS UDP send/recv buffers (up to 8 MiB via `socket2` with graceful fallback)
+/// Optimized for desktop gigabit LANs while gracefully degrading on mobile (Android/iOS) kernels:
+/// - Requests profile-appropriate `SO_RCVBUF`/`SO_SNDBUF` sizes via `socket2` with step-down fallback
+/// - Uses kernel UDP GSO/GRO (`UdpSocketState`) when supported and automatically latches
+///   `gso_disabled` / standard `try_send_to` + `try_recv_from` fallback if rejected by Android/iOS
 /// - Lock-free `AtomicBool` fast-path guards avoid `RwLock` acquisition on clean LAN traffic
-/// - Batched `poll_recv` drains multiple datagrams per async wakeup
 /// - Shares one UDP port for QUIC, STUN/hole-punching (`0x1BVLC`), and blind encrypted `RelayForward`
 pub struct MagicUdpSocket {
     io: Arc<UdpSocket>,
-    udp_state: UdpSocketState,
+    /// Optional kernel offload state (`None` when OS rejects GSO/GRO socket options).
+    udp_state: Option<UdpSocketState>,
+    /// Latched to `true` if a mobile/VPN kernel rejects `UDP_SEGMENT` (GSO) at send time.
+    gso_disabled: AtomicBool,
     local_node_id: NodeId,
     routes: RwLock<RouteTable>,
     /// Lock-free fast-path flag: false until at least one virtual route is installed.
@@ -84,12 +85,13 @@ impl fmt::Debug for MagicUdpSocket {
             .field("local_addr", &self.io.local_addr().ok())
             .field("recv_buf", &self.configured_recv_buf)
             .field("send_buf", &self.configured_send_buf)
+            .field("gso_enabled", &self.is_gso_enabled())
             .finish()
     }
 }
 
 impl MagicUdpSocket {
-    /// Binds a tuned UDP socket (`SO_RCVBUF`/`SO_SNDBUF` up to 8 MiB) and wraps it as `MagicUdpSocket`.
+    /// Binds a tuned UDP socket using the default Desktop profile.
     pub async fn bind(
         bind_addr: SocketAddr,
         local_node_id: NodeId,
@@ -97,14 +99,40 @@ impl MagicUdpSocket {
         Arc<Self>,
         mpsc::UnboundedReceiver<(SocketAddr, SignalingMessage)>,
     )> {
-        let (std_sock, recv_buf, send_buf) = bind_tuned_udp_socket(bind_addr)?;
-        let udp_state = UdpSocketState::new((&std_sock).into())?;
+        Self::bind_with_profile(bind_addr, local_node_id, TransferProfile::Desktop).await
+    }
+
+    /// Binds a UDP socket tuned for `TransferProfile` (`Desktop` vs `Mobile`), degrading
+    /// gracefully if OS socket buffer sizes or kernel GSO/GRO options are restricted.
+    pub async fn bind_with_profile(
+        bind_addr: SocketAddr,
+        local_node_id: NodeId,
+        profile: TransferProfile,
+    ) -> io::Result<(
+        Arc<Self>,
+        mpsc::UnboundedReceiver<(SocketAddr, SignalingMessage)>,
+    )> {
+        let (std_sock, recv_buf, send_buf) =
+            bind_tuned_udp_socket(bind_addr, profile.udp_buffer_ladder())?;
+        let udp_state = match UdpSocketState::new((&std_sock).into()) {
+            Ok(state) => Some(state),
+            Err(err) => {
+                tracing::warn!(
+                    "UDP GSO/GRO socket state unavailable on this platform ({}); falling back to standard UDP I/O",
+                    err
+                );
+                None
+            }
+        };
         let io = Arc::new(UdpSocket::from_std(std_sock)?);
         let (signaling_tx, signaling_rx) = mpsc::unbounded_channel();
         let (path_events_tx, _) = broadcast::channel(64);
+        let gso_disabled = udp_state.is_none();
+
         let sock = Arc::new(Self {
             io,
             udp_state,
+            gso_disabled: AtomicBool::new(gso_disabled),
             local_node_id,
             routes: RwLock::new(RouteTable::default()),
             has_virtual_routes: AtomicBool::new(false),
@@ -129,6 +157,15 @@ impl MagicUdpSocket {
 
     pub fn configured_buffer_sizes(&self) -> (usize, usize) {
         (self.configured_recv_buf, self.configured_send_buf)
+    }
+
+    pub fn is_gso_enabled(&self) -> bool {
+        self.udp_state.is_some() && !self.gso_disabled.load(Ordering::Acquire)
+    }
+
+    /// Disables GSO (testing/diagnostic helper verifying mobile kernel fallback behavior).
+    pub fn force_disable_gso(&self) {
+        self.gso_disabled.store(true, Ordering::Release);
     }
 
     pub fn set_force_relay(&self, force: bool) {
@@ -285,21 +322,56 @@ impl MagicUdpSocket {
             IpAddr::V6(_) => false,
         }
     }
+
+    /// Sends a direct QUIC transmit using kernel GSO when enabled, automatically latching
+    /// `gso_disabled` and falling back to segmented `try_send_to` if rejected by Android/iOS.
+    fn send_direct(&self, transmit: &Transmit) -> io::Result<()> {
+        if let Some(ref state) = self.udp_state {
+            if !self.gso_disabled.load(Ordering::Acquire) {
+                match self.io.try_io(Interest::WRITABLE, || {
+                    state.send((&*self.io).into(), transmit)
+                }) {
+                    Ok(()) => return Ok(()),
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(e),
+                    Err(err) if transmit.segment_size.is_some() => {
+                        tracing::warn!(
+                            "Kernel UDP GSO rejected ({}); disabling GSO and falling back to single-segment UDP sends",
+                            err
+                        );
+                        self.gso_disabled.store(true, Ordering::Release);
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+
+        let seg_size = transmit
+            .segment_size
+            .unwrap_or(transmit.contents.len())
+            .max(1);
+        for segment in transmit.contents.chunks(seg_size) {
+            self.io.try_send_to(segment, transmit.destination)?;
+        }
+        Ok(())
+    }
 }
 
-/// Creates a non-blocking UDP socket with tuned `SO_RCVBUF`/`SO_SNDBUF` sizes (falling back
-/// cleanly to smaller sizes or OS defaults when restricted by `net.core.rmem_max` / containers).
-fn bind_tuned_udp_socket(bind_addr: SocketAddr) -> io::Result<(std::net::UdpSocket, usize, usize)> {
+/// Creates a non-blocking UDP socket with profile-appropriate `SO_RCVBUF`/`SO_SNDBUF` sizes,
+/// gracefully stepping down if restricted by mobile/container kernel caps.
+fn bind_tuned_udp_socket(
+    bind_addr: SocketAddr,
+    buffer_ladder: &[usize],
+) -> io::Result<(std::net::UdpSocket, usize, usize)> {
     let domain = Domain::for_address(bind_addr);
     let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_nonblocking(true)?;
 
-    for &size in UDP_BUFFER_SIZES {
+    for &size in buffer_ladder {
         if sock.set_recv_buffer_size(size).is_ok() {
             break;
         }
     }
-    for &size in UDP_BUFFER_SIZES {
+    for &size in buffer_ladder {
         if sock.set_send_buffer_size(size).is_ok() {
             break;
         }
@@ -322,11 +394,9 @@ impl AsyncUdpSocket for MagicUdpSocket {
     fn try_send(&self, transmit: &Transmit) -> io::Result<()> {
         let dest = transmit.destination;
 
-        // Lock-free GSO hot path for direct LAN / direct WAN UDP packets.
+        // Lock-free hot path for direct LAN / direct WAN UDP packets.
         if !self.has_virtual_routes.load(Ordering::Acquire) || !Self::is_virtual_addr(dest) {
-            return self.io.try_io(Interest::WRITABLE, || {
-                self.udp_state.send((&*self.io).into(), transmit)
-            });
+            return self.send_direct(transmit);
         }
 
         let route = {
@@ -337,7 +407,10 @@ impl AsyncUdpSocket for MagicUdpSocket {
             return Ok(());
         };
 
-        let seg_size = transmit.segment_size.unwrap_or(transmit.contents.len()).max(1);
+        let seg_size = transmit
+            .segment_size
+            .unwrap_or(transmit.contents.len())
+            .max(1);
 
         if !self.force_relay.load(Ordering::Relaxed) {
             if let Some(direct) = route.direct_addr {
@@ -348,9 +421,7 @@ impl AsyncUdpSocket for MagicUdpSocket {
                     segment_size: transmit.segment_size,
                     src_ip: transmit.src_ip,
                 };
-                return self.io.try_io(Interest::WRITABLE, || {
-                    self.udp_state.send((&*self.io).into(), &rewritten)
-                });
+                return self.send_direct(&rewritten);
             }
         }
 
@@ -383,13 +454,41 @@ impl AsyncUdpSocket for MagicUdpSocket {
 
         loop {
             ready!(self.io.poll_recv_ready(cx))?;
-            let count = match self.io.try_io(Interest::READABLE, || {
-                self.udp_state
-                    .recv((&*self.io).into(), &mut bufs[..capacity], &mut meta[..capacity])
-            }) {
-                Ok(n) => n,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(e) => return Poll::Ready(Err(e)),
+            let count = if let Some(ref state) = self.udp_state {
+                match self.io.try_io(Interest::READABLE, || {
+                    state.recv((&*self.io).into(), &mut bufs[..capacity], &mut meta[..capacity])
+                }) {
+                    Ok(n) => n,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                    Err(e) => return Poll::Ready(Err(e)),
+                }
+            } else {
+                // Fallback path when UdpSocketState (GRO/recvmmsg) is unavailable on the platform.
+                let mut n_read = 0usize;
+                while n_read < capacity {
+                    match self.io.try_recv_from(&mut bufs[n_read]) {
+                        Ok((len, addr)) => {
+                            meta[n_read] = RecvMeta {
+                                addr,
+                                len,
+                                stride: len,
+                                ecn: None,
+                                dst_ip: None,
+                            };
+                            n_read += 1;
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(e) if n_read > 0 => {
+                            let _ = e;
+                            break;
+                        }
+                        Err(e) => return Poll::Ready(Err(e)),
+                    }
+                }
+                if n_read == 0 {
+                    continue;
+                }
+                n_read
             };
 
             let mut write_idx = 0usize;
@@ -401,8 +500,6 @@ impl AsyncUdpSocket for MagicUdpSocket {
                     continue;
                 }
 
-                // Signaling packets are single datagrams (never GRO-coalesced across different lengths)
-                // starting with `0x1BVLC` (fixed bit 0x40 == 0).
                 let is_sig = m.len == m.stride
                     && SignalingMessage::is_signaling_datagram(&bufs[read_idx][..m.len]);
 
@@ -445,7 +542,6 @@ impl AsyncUdpSocket for MagicUdpSocket {
                     continue;
                 }
 
-                // Raw QUIC packet (possibly GRO-coalesced with valid `m.stride`).
                 let mapped_addr = if has_overrides {
                     let table = self.routes.read().expect("route table lock poisoned");
                     table
@@ -458,7 +554,6 @@ impl AsyncUdpSocket for MagicUdpSocket {
                 };
 
                 if write_idx != read_idx {
-                    // Compact surviving QUIC payload into `bufs[write_idx]` after dropped signaling slots.
                     let copy_len = m.len.min(bufs[write_idx].len());
                     let (left, right) = bufs.split_at_mut(read_idx);
                     left[write_idx][..copy_len].copy_from_slice(&right[0][..copy_len]);
@@ -485,18 +580,24 @@ impl AsyncUdpSocket for MagicUdpSocket {
     }
 
     fn may_fragment(&self) -> bool {
-        // Keep QUIC MTU bounded at `initial_mtu` (1380B) so relayed envelopes never fragment.
         true
     }
 
     fn max_transmit_segments(&self) -> usize {
-        // Enable kernel UDP GSO (up to 64 segments per sendmsg) on direct LAN/WAN transfers.
-        self.udp_state.max_gso_segments()
+        if self.gso_disabled.load(Ordering::Acquire) {
+            return 1;
+        }
+        self.udp_state
+            .as_ref()
+            .map(UdpSocketState::max_gso_segments)
+            .unwrap_or(1)
     }
 
     fn max_receive_segments(&self) -> usize {
-        // Enable kernel UDP GRO coalescing matching `self.udp_state.recv`.
-        self.udp_state.gro_segments()
+        self.udp_state
+            .as_ref()
+            .map(UdpSocketState::gro_segments)
+            .unwrap_or(1)
     }
 }
 

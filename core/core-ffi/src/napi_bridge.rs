@@ -22,17 +22,28 @@ pub struct JsEngineConfig {
     pub enable_mdns: Option<bool>,
     pub parallel_streams: Option<u32>,
     pub relay_addrs: Option<Vec<String>>,
+    pub profile: Option<String>,
+    pub override_lan_addrs: Option<Vec<String>>,
     pub force_relay: Option<bool>,
 }
 
 impl From<JsEngineConfig> for EngineConfigDto {
     fn from(cfg: JsEngineConfig) -> Self {
+        let profile = cfg.profile.as_deref().map(|s| {
+            if s.eq_ignore_ascii_case("mobile") {
+                core_protocol::TransferProfile::Mobile
+            } else {
+                core_protocol::TransferProfile::Desktop
+            }
+        });
         Self {
             device_name: cfg.device_name,
             bind_addr: cfg.bind_addr,
             enable_mdns: cfg.enable_mdns,
             parallel_streams: cfg.parallel_streams,
             relay_addrs: cfg.relay_addrs,
+            profile,
+            override_lan_addrs: cfg.override_lan_addrs,
             force_relay: cfg.force_relay,
         }
     }

@@ -279,16 +279,14 @@ async fn bench_multistream_quic_bbr(
         device_name: "BenchSender".into(),
         enable_mdns: false,
         parallel_streams: streams,
-        relay_addrs: Vec::new(),
-        force_relay: false,
+        ..Default::default()
     };
     let receiver_opts = EndpointOptions {
         bind_addr: SocketAddr::new(IpAddr::V4(peer_ip), 0),
         device_name: "BenchReceiver".into(),
         enable_mdns: false,
         parallel_streams: streams,
-        relay_addrs: Vec::new(),
-        force_relay: false,
+        ..Default::default()
     };
 
     let (sender, _s_ch) = VeloceEndpoint::bind(sender_opts).await?;

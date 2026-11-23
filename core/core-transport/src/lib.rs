@@ -7,8 +7,8 @@ pub mod nat;
 pub mod transfer;
 
 pub use discovery::{
-    classify_interface_priority, local_lan_addrs, DiscoveryEvent, LanDiscovery, LocalPeer,
-    MDNS_SERVICE_TYPE,
+    classify_interface_priority, local_lan_addrs, local_lan_addrs_with_overrides, DiscoveryEvent,
+    LanDiscovery, LocalPeer, MDNS_SERVICE_TYPE,
 };
 pub use endpoint::{
     classify_socket_addr, EndpointChannels, EndpointOptions, HostedSession, IncomingOffer,
@@ -16,13 +16,14 @@ pub use endpoint::{
 };
 pub use error::{Result, TransportError};
 pub use identity::{
-    build_bbr_transport_config, extract_node_id_from_cert, peer_node_id, PeerIdentity,
+    build_bbr_transport_config, build_bbr_transport_config_for_profile, extract_node_id_from_cert,
+    peer_node_id, PeerIdentity,
 };
 pub use magic_socket::{MagicUdpSocket, PathChangeEvent};
 pub use nat::{NatConnectPlan, NatCoordinator};
 pub use transfer::{
-    run_receiver_session, run_sender_session, TransferConfig, TransferDirection, TransferProgress,
-    TransferSummary, DEFAULT_PARALLEL_STREAMS,
+    run_receiver_session, run_receiver_session_with_profile, run_sender_session, TransferConfig,
+    TransferDirection, TransferProgress, TransferSummary, DEFAULT_PARALLEL_STREAMS,
 };
 
 #[cfg(test)]
@@ -42,8 +43,7 @@ mod tests {
             device_name: name.into(),
             enable_mdns: false,
             parallel_streams: 8,
-            relay_addrs: Vec::new(),
-            force_relay: false,
+            ..Default::default()
         }
     }
 
@@ -473,5 +473,74 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(msg, SignalingMessage::StunRequest { tx_id: 777 });
+    }
+
+    #[tokio::test]
+    async fn mobile_profile_gso_fallback_dns_relay_and_lan_overrides() {
+        use core_protocol::TransferProfile;
+
+        let relay = RelayServer::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .unwrap();
+        let dns_relay = format!("localhost:{}", relay.local_addr().port());
+
+        let override_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 55, 77));
+        let lan_addrs = local_lan_addrs_with_overrides(5555, &[override_ip]);
+        assert_eq!(lan_addrs.first().copied(), Some(SocketAddr::new(override_ip, 5555)));
+
+        let mut s_opts = EndpointOptions {
+            bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            device_name: "AndroidSender".into(),
+            enable_mdns: false,
+            parallel_streams: TransferProfile::Mobile.default_parallel_streams(),
+            relay_hosts: vec![dns_relay.clone()],
+            profile: TransferProfile::Mobile,
+            override_lan_addrs: vec![override_ip],
+            force_relay: true,
+            ..Default::default()
+        };
+        let mut r_opts = s_opts.clone();
+        r_opts.device_name = "IosReceiver".into();
+        s_opts.override_lan_addrs.clear();
+
+        let (sender, _s_ch) = VeloceEndpoint::bind(s_opts).await.unwrap();
+        let (receiver, _r_ch) = VeloceEndpoint::bind(r_opts).await.unwrap();
+
+        // Simulate Android/iOS kernel rejecting GSO at runtime.
+        sender.magic_socket().force_disable_gso();
+        receiver.magic_socket().force_disable_gso();
+        assert!(!sender.magic_socket().is_gso_enabled());
+
+        let src_dir = tempdir().unwrap();
+        let dst_dir = tempdir().unwrap();
+        let payload: Vec<u8> = (0..250_000u32).map(|i| ((i * 13) % 251) as u8).collect();
+        let file = src_dir.path().join("photo.bin");
+        fs::write(&file, &payload).unwrap();
+
+        let source = ChunkSource::from_paths_for_profile_async(
+            vec![file],
+            TransferProfile::Mobile,
+            Some(64 * 1024),
+        )
+        .await
+        .unwrap();
+        assert!(!source.has_active_mmaps());
+
+        let hosted = sender.host_session(source, vec![], vec![]).unwrap();
+        // Ticket must preserve DNS `localhost:<port>` relay hint.
+        assert!(hosted.ticket.relay_hints.contains(&dns_relay));
+
+        let mut ticket = hosted.ticket.clone();
+        ticket.direct_addrs.clear();
+        let summary = receiver
+            .join_session(&ticket, dst_dir.path().to_path_buf(), None)
+            .await
+            .unwrap();
+        assert_eq!(summary.total_bytes, payload.len() as u64);
+        assert_eq!(fs::read(dst_dir.path().join("photo.bin")).unwrap(), payload);
+
+        sender.shutdown();
+        receiver.shutdown();
+        relay.shutdown();
     }
 }

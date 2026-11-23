@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use core_protocol::{
     read_data_frame, read_frame, write_data_frame, write_frame, ChunkErrorCode, ConnectionType,
-    ControlMessage, DataMessage, HandshakeStateMachine, NodeId, TransferManifest,
+    ControlMessage, DataMessage, HandshakeStateMachine, NodeId, TransferManifest, TransferProfile,
     MAX_CONTROL_FRAME_SIZE, MAX_DATA_FRAME_SIZE, PROTOCOL_VERSION,
 };
 use core_storage::{ChunkAssembler, ChunkBitfield, ChunkSource};
@@ -312,13 +312,42 @@ pub async fn run_sender_session(
     result
 }
 
-/// Executes the receiver side of a transfer over an established QUIC connection.
-///
-/// Opens `parallel_streams` concurrent bidirectional QUIC streams, each pipelining up to
-/// `STREAM_PIPELINE_DEPTH` chunk requests in flight while overlapping BLAKE3 Merkle verification
-/// and positional disk writes via a bounded concurrency semaphore.
+/// Executes the receiver side of a transfer using the Desktop concurrency profile.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_receiver_session(
+    transfer_id: String,
+    conn: Connection,
+    ctrl_send: quinn::SendStream,
+    ctrl_recv: quinn::RecvStream,
+    sm: HandshakeStateMachine,
+    manifest: TransferManifest,
+    output_dir: PathBuf,
+    parallel_streams: usize,
+    connection_type_rx: Arc<Mutex<ConnectionType>>,
+    progress_tx: Option<mpsc::UnboundedSender<TransferProgress>>,
+    cancel: CancellationToken,
+) -> Result<TransferSummary> {
+    run_receiver_session_with_profile(
+        transfer_id,
+        conn,
+        ctrl_send,
+        ctrl_recv,
+        sm,
+        manifest,
+        output_dir,
+        parallel_streams,
+        TransferProfile::Desktop,
+        connection_type_rx,
+        progress_tx,
+        cancel,
+    )
+    .await
+}
+
+/// Executes the receiver side of a transfer honoring `TransferProfile` (`Desktop` vs `Mobile`)
+/// for stream pipeline depth and concurrent disk verification/write bounds.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_receiver_session_with_profile(
     transfer_id: String,
     conn: Connection,
     mut ctrl_send: quinn::SendStream,
@@ -327,10 +356,14 @@ pub async fn run_receiver_session(
     manifest: TransferManifest,
     output_dir: PathBuf,
     parallel_streams: usize,
+    profile: TransferProfile,
     connection_type_rx: Arc<Mutex<ConnectionType>>,
     progress_tx: Option<mpsc::UnboundedSender<TransferProgress>>,
     cancel: CancellationToken,
 ) -> Result<TransferSummary> {
+    let pipeline_depth = profile.stream_pipeline_depth().max(1);
+    let max_disk_writes = profile.max_concurrent_disk_writes().max(1);
+    let _ = (STREAM_PIPELINE_DEPTH, MAX_CONCURRENT_DISK_WRITES);
     let session_start = Instant::now();
     let total_bytes = manifest.total_size;
     let total_chunks = manifest.total_chunks;
@@ -382,7 +415,7 @@ pub async fn run_receiver_session(
         let queue: Arc<Mutex<VecDeque<(u32, u32)>>> = Arc::new(Mutex::new(
             missing.into_iter().map(|idx| (idx, 0u32)).collect(),
         ));
-        let disk_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_DISK_WRITES));
+        let disk_sem = Arc::new(Semaphore::new(max_disk_writes));
         let worker_count = parallel_streams
             .max(1)
             .min(total_chunks.max(1) as usize);
@@ -401,8 +434,7 @@ pub async fn run_receiver_session(
 
             workers.push(tokio::spawn(async move {
                 let (mut send, mut recv) = w_conn.open_bi().await?;
-                let mut inflight: VecDeque<(u32, u32)> =
-                    VecDeque::with_capacity(STREAM_PIPELINE_DEPTH);
+                let mut inflight: VecDeque<(u32, u32)> = VecDeque::with_capacity(pipeline_depth);
                 let mut disk_tasks: JoinSet<Result<()>> = JoinSet::new();
 
                 loop {
@@ -419,8 +451,8 @@ pub async fn run_receiver_session(
                         }
                     }
 
-                    // Fill pipeline window up to STREAM_PIPELINE_DEPTH requests ahead.
-                    while inflight.len() < STREAM_PIPELINE_DEPTH {
+                    // Fill pipeline window up to `pipeline_depth` requests ahead.
+                    while inflight.len() < pipeline_depth {
                         let next_item = {
                             let mut q = w_queue.lock().expect("queue lock poisoned");
                             q.pop_front()

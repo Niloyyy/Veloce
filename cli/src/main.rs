@@ -307,7 +307,7 @@ async fn run(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     Some(relays.clone())
                 },
-                force_relay: Some(false),
+                ..Default::default()
             })
             .await?;
 
@@ -438,6 +438,7 @@ async fn run(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
                     Some(relays)
                 },
                 force_relay: Some(force_relay),
+                ..Default::default()
             })
             .await?;
 
@@ -522,8 +523,7 @@ async fn run(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
                 bind_addr: None,
                 enable_mdns: Some(true),
                 parallel_streams: Some(4),
-                relay_addrs: None,
-                force_relay: Some(false),
+                ..Default::default()
             })
             .await?;
 

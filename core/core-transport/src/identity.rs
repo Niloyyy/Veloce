@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use core_protocol::{NodeId, ALPN_VELOCE};
+use core_protocol::{NodeId, TransferProfile, ALPN_VELOCE};
 use quinn::congestion::BbrConfig;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{ClientConfig, IdleTimeout, ServerConfig, TransportConfig};
@@ -128,21 +128,26 @@ impl PeerIdentity {
     }
 }
 
-/// Constructs a high-throughput QUIC `TransportConfig` using BBR congestion control and
-/// large flow-control windows tuned for Long Fat Networks (high bandwidth-delay product).
+/// Constructs a high-throughput QUIC `TransportConfig` using BBR congestion control
+/// with Desktop-class flow-control windows.
 pub fn build_bbr_transport_config() -> Result<Arc<TransportConfig>> {
+    build_bbr_transport_config_for_profile(TransferProfile::Desktop)
+}
+
+/// Constructs a QUIC `TransportConfig` using BBR congestion control tuned for `TransferProfile`
+/// (64 MiB desktop windows vs bounded 8 MiB mobile windows to prevent iOS Jetsam OOMs).
+pub fn build_bbr_transport_config_for_profile(
+    profile: TransferProfile,
+) -> Result<Arc<TransportConfig>> {
     let mut cfg = TransportConfig::default();
     let mut bbr = BbrConfig::default();
-    // Use a 512 KiB initial congestion window so BBR saturates gigabit LANs and
-    // high-BDP WAN links quickly instead of spending extra RTTs ramping from 12 KiB.
-    bbr.initial_window(512 * 1024);
+    bbr.initial_window(profile.bbr_initial_window());
     cfg.congestion_controller_factory(Arc::new(bbr));
     cfg.max_concurrent_bidi_streams(128u32.into());
     cfg.max_concurrent_uni_streams(64u32.into());
-    // 64 MiB connection window & 16 MiB per-stream window prevent flow-control starvation on LFNs.
-    cfg.receive_window((64u32 * 1024 * 1024).into());
-    cfg.stream_receive_window((16u32 * 1024 * 1024).into());
-    cfg.send_window(64 * 1024 * 1024);
+    cfg.receive_window(profile.quic_receive_window().into());
+    cfg.stream_receive_window(profile.quic_stream_receive_window().into());
+    cfg.send_window(profile.quic_send_window());
     // 1380-byte initial MTU maximizes payload efficiency while still leaving headroom for
     // RelayForward framing (~76B) inside standard 1500-byte Ethernet MTU without fragmentation.
     cfg.initial_mtu(1380);

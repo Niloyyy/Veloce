@@ -5,6 +5,7 @@ members = [
     "core/core-storage",
     "core/core-transport",
     "core/core-ffi",
+    "core/core-mobile-ffi",
     "cli",
     "relay",
     "bench",
@@ -21,8 +22,9 @@ blake3 = "1.5"
 bytes = "1.7"
 data-encoding = "2.6"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+flutter_rust_bridge = "2"
+getifs = "0.4"
 hex = "0.4"
-if-addrs = "0.13"
 mdns-sd = "0.13"
 memmap2 = "0.9"
 postcard = { version = "1.0", features = ["alloc"] }

@@ -75,6 +75,103 @@ impl fmt::Debug for NodeId {
     }
 }
 
+/// Runtime resource tuning profile adapting memory, chunk ceiling, and concurrency
+/// between desktop workstations and mobile devices (avoiding iOS Jetsam / Android LMK OOMs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransferProfile {
+    #[default]
+    Desktop,
+    Mobile,
+}
+
+impl TransferProfile {
+    /// Default concurrent QUIC bidirectional data streams per transfer.
+    pub const fn default_parallel_streams(self) -> usize {
+        match self {
+            TransferProfile::Desktop => 8,
+            TransferProfile::Mobile => 4,
+        }
+    }
+
+    /// Pipelined chunk requests in flight per QUIC stream.
+    pub const fn stream_pipeline_depth(self) -> usize {
+        match self {
+            TransferProfile::Desktop => 4,
+            TransferProfile::Mobile => 2,
+        }
+    }
+
+    /// Maximum concurrent BLAKE3 verify + positional disk write tasks.
+    pub const fn max_concurrent_disk_writes(self) -> usize {
+        match self {
+            TransferProfile::Desktop => 24,
+            TransferProfile::Mobile => 6,
+        }
+    }
+
+    /// Upper bound on chunk size in bytes (4 MiB desktop vs 1 MiB mobile).
+    pub const fn max_chunk_size(self) -> u32 {
+        match self {
+            TransferProfile::Desktop => 4 * 1024 * 1024,
+            TransferProfile::Mobile => 1024 * 1024,
+        }
+    }
+
+    /// Whether to use `memmap2` read-only file mappings (disabled on mobile to avoid iOS Jetsam kills).
+    pub const fn use_mmap(self) -> bool {
+        match self {
+            TransferProfile::Desktop => true,
+            TransferProfile::Mobile => false,
+        }
+    }
+
+    /// Connection-level QUIC flow-control receive window in bytes.
+    pub const fn quic_receive_window(self) -> u32 {
+        match self {
+            TransferProfile::Desktop => 64 * 1024 * 1024,
+            TransferProfile::Mobile => 8 * 1024 * 1024,
+        }
+    }
+
+    /// Per-stream QUIC flow-control receive window in bytes.
+    pub const fn quic_stream_receive_window(self) -> u32 {
+        match self {
+            TransferProfile::Desktop => 16 * 1024 * 1024,
+            TransferProfile::Mobile => 2 * 1024 * 1024,
+        }
+    }
+
+    /// Connection-level QUIC send window in bytes.
+    pub const fn quic_send_window(self) -> u64 {
+        match self {
+            TransferProfile::Desktop => 64 * 1024 * 1024,
+            TransferProfile::Mobile => 8 * 1024 * 1024,
+        }
+    }
+
+    /// BBR initial congestion window in bytes.
+    pub const fn bbr_initial_window(self) -> u64 {
+        match self {
+            TransferProfile::Desktop => 512 * 1024,
+            TransferProfile::Mobile => 128 * 1024,
+        }
+    }
+
+    /// Descending OS UDP socket buffer size ladder (`SO_RCVBUF`/`SO_SNDBUF`).
+    pub const fn udp_buffer_ladder(self) -> &'static [usize] {
+        match self {
+            TransferProfile::Desktop => &[
+                8 * 1024 * 1024,
+                4 * 1024 * 1024,
+                2 * 1024 * 1024,
+                1024 * 1024,
+            ],
+            TransferProfile::Mobile => &[2 * 1024 * 1024, 1024 * 1024, 512 * 1024, 256 * 1024],
+        }
+    }
+}
+
 /// Active transport path classification reported to the UI and telemetry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ConnectionType {

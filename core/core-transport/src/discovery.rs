@@ -92,34 +92,76 @@ pub fn classify_interface_priority(iface_name: &str, ip: IpAddr) -> Option<u8> {
     }
 }
 
-/// Enumerates local network addresses bound to `port`, filtering out virtual container/VM bridges
-/// and link-local addresses and ordering physical LAN NICs ahead of VPN/TUN fallbacks.
-pub fn local_lan_addrs(port: u16) -> Vec<SocketAddr> {
+/// Enumerates local network addresses bound to `port`, honoring explicit platform `overrides`
+/// (e.g. Android `ConnectivityManager` Wi-Fi IPs on API 30+ where `RTM_GETLINK` is restricted),
+/// filtering out virtual container/VM bridges and link-local addresses, and falling back to
+/// `getifs::local_addrs()` if full interface table enumeration is blocked by the OS.
+pub fn local_lan_addrs_with_overrides(port: u16, overrides: &[IpAddr]) -> Vec<SocketAddr> {
     let mut ranked: Vec<(u8, SocketAddr)> = Vec::new();
-    if let Ok(ifaces) = if_addrs::get_if_addrs() {
+
+    // Explicit platform-supplied LAN IPs always take highest priority (tier 0).
+    for &ip in overrides {
+        if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+            continue;
+        }
+        let sock = SocketAddr::new(ip, port);
+        if !ranked.iter().any(|(_, existing)| *existing == sock) {
+            ranked.push((0, sock));
+        }
+    }
+
+    let mut enumerated_any = false;
+    if let Ok(ifaces) = getifs::interfaces() {
         for iface in ifaces {
-            if iface.is_loopback() {
-                continue;
-            }
-            let ip = iface.ip();
-            let Some(prio) = classify_interface_priority(&iface.name, ip) else {
+            let name = iface.name().as_str();
+            let Ok(addrs) = iface.addrs() else {
                 continue;
             };
-            let sock = SocketAddr::new(ip, port);
-            if !ranked.iter().any(|(_, existing)| *existing == sock) {
-                ranked.push((prio, sock));
+            for ifnet in addrs {
+                let ip = ifnet.addr();
+                let Some(prio) = classify_interface_priority(name, ip) else {
+                    continue;
+                };
+                enumerated_any = true;
+                let sock = SocketAddr::new(ip, port);
+                if !ranked.iter().any(|(_, existing)| *existing == sock) {
+                    ranked.push((prio, sock));
+                }
             }
         }
     }
+
+    // Android API 30+ fallback: if RTM_GETLINK interface enumeration failed or returned empty,
+    // query routed local addresses directly via `getifs::local_addrs()`.
+    if !enumerated_any {
+        if let Ok(addrs) = getifs::local_addrs() {
+            for ifnet in addrs {
+                let ip = ifnet.addr();
+                let Some(prio) = classify_interface_priority("wlan0", ip) else {
+                    continue;
+                };
+                let sock = SocketAddr::new(ip, port);
+                if !ranked.iter().any(|(_, existing)| *existing == sock) {
+                    ranked.push((prio, sock));
+                }
+            }
+        }
+    }
+
     ranked.sort_by_key(|(prio, _)| *prio);
 
-    // If real physical LAN NICs exist (priority <= 2), omit VPN/tunnel adapters from LAN hints.
+    // If real physical LAN NICs (or explicit overrides) exist (priority <= 2), omit VPN fallbacks.
     let has_physical = ranked.iter().any(|(prio, _)| *prio <= 2);
     ranked
         .into_iter()
         .filter(|(prio, _)| !has_physical || *prio <= 2)
         .map(|(_, addr)| addr)
         .collect()
+}
+
+/// Enumerates local network addresses bound to `port` without explicit overrides.
+pub fn local_lan_addrs(port: u16) -> Vec<SocketAddr> {
+    local_lan_addrs_with_overrides(port, &[])
 }
 
 /// Manages mDNS advertisement and zero-configuration browsing of nearby LAN peers.
@@ -138,12 +180,22 @@ impl LanDiscovery {
         device_name: String,
         listen_port: u16,
     ) -> Result<Self> {
+        Self::start_with_overrides(local_node_id, device_name, listen_port, &[])
+    }
+
+    /// Starts mDNS advertisement/browsing using explicit platform LAN IP overrides if provided.
+    pub fn start_with_overrides(
+        local_node_id: NodeId,
+        device_name: String,
+        listen_port: u16,
+        override_lan_addrs: &[IpAddr],
+    ) -> Result<Self> {
         let daemon = ServiceDaemon::new()
             .map_err(|e| TransportError::Discovery(format!("failed to start mDNS daemon: {e}")))?;
 
         let instance_name = format!("veloce-{}", local_node_id.short_id());
         let host_name = format!("{instance_name}.local.");
-        let ips: Vec<IpAddr> = local_lan_addrs(listen_port)
+        let ips: Vec<IpAddr> = local_lan_addrs_with_overrides(listen_port, override_lan_addrs)
             .into_iter()
             .map(|a| a.ip())
             .collect();

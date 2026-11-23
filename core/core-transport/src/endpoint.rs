@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use core_protocol::{
     read_frame, write_frame, ConnectionType, ControlMessage, HandshakeStateMachine, NodeId,
-    SessionRole, SessionTicket, TransferManifest, MAX_CONTROL_FRAME_SIZE, PROTOCOL_VERSION,
+    SessionRole, SessionTicket, TransferManifest, TransferProfile, MAX_CONTROL_FRAME_SIZE,
+    PROTOCOL_VERSION,
 };
 use core_storage::ChunkSource;
 use quinn::{Endpoint, EndpointConfig, TransportConfig};
@@ -15,13 +16,15 @@ use rand::RngCore;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::discovery::{local_lan_addrs, DiscoveryEvent, LanDiscovery, LocalPeer};
+use crate::discovery::{
+    local_lan_addrs_with_overrides, DiscoveryEvent, LanDiscovery, LocalPeer,
+};
 use crate::error::{Result, TransportError};
-use crate::identity::{build_bbr_transport_config, peer_node_id, PeerIdentity};
+use crate::identity::{build_bbr_transport_config_for_profile, peer_node_id, PeerIdentity};
 use crate::magic_socket::{MagicUdpSocket, PathChangeEvent};
 use crate::nat::NatCoordinator;
 use crate::transfer::{
-    graceful_close, run_receiver_session, run_sender_session, send_and_receive_hello,
+    graceful_close, run_receiver_session_with_profile, run_sender_session, send_and_receive_hello,
     TransferProgress, TransferSummary, DEFAULT_PARALLEL_STREAMS,
 };
 
@@ -68,6 +71,9 @@ pub struct TransferConnectionChanged {
 pub struct VeloceEndpoint {
     identity: PeerIdentity,
     device_name: String,
+    profile: TransferProfile,
+    override_lan_addrs: Vec<IpAddr>,
+    relay_hosts: Vec<String>,
     endpoint: Endpoint,
     magic_socket: Arc<MagicUdpSocket>,
     nat: Arc<NatCoordinator>,
@@ -89,7 +95,14 @@ pub struct EndpointOptions {
     pub device_name: String,
     pub enable_mdns: bool,
     pub parallel_streams: usize,
+    /// Pre-resolved relay socket addresses.
     pub relay_addrs: Vec<SocketAddr>,
+    /// Relay endpoints specified as DNS `host:port` or `ip:port` strings (resolved dynamically).
+    pub relay_hosts: Vec<String>,
+    /// Runtime memory & concurrency profile (`Desktop` vs `Mobile`).
+    pub profile: TransferProfile,
+    /// Optional platform-provided local LAN IPs (e.g., Android API 30+ `ConnectivityManager`).
+    pub override_lan_addrs: Vec<IpAddr>,
     /// Forces virtual peer traffic through the relay (useful for symmetric NAT testing).
     pub force_relay: bool,
 }
@@ -102,6 +115,9 @@ impl Default for EndpointOptions {
             enable_mdns: true,
             parallel_streams: DEFAULT_PARALLEL_STREAMS,
             relay_addrs: Vec::new(),
+            relay_hosts: Vec::new(),
+            profile: TransferProfile::Desktop,
+            override_lan_addrs: Vec::new(),
             force_relay: false,
         }
     }
@@ -119,11 +135,12 @@ impl VeloceEndpoint {
     /// Ed25519 mutual TLS 1.3, optional mDNS discovery, and NAT/relay coordination.
     pub async fn bind(opts: EndpointOptions) -> Result<(Arc<Self>, EndpointChannels)> {
         let identity = PeerIdentity::generate()?;
-        let transport_config = build_bbr_transport_config()?;
+        let transport_config = build_bbr_transport_config_for_profile(opts.profile)?;
         let server_config = identity.build_server_config(Arc::clone(&transport_config))?;
 
         let (magic_socket, signaling_rx) =
-            MagicUdpSocket::bind(opts.bind_addr, identity.node_id()).await?;
+            MagicUdpSocket::bind_with_profile(opts.bind_addr, identity.node_id(), opts.profile)
+                .await?;
         magic_socket.set_force_relay(opts.force_relay);
         let listen_addr = magic_socket.local_addr()?;
 
@@ -137,24 +154,41 @@ impl VeloceEndpoint {
             runtime,
         )?;
 
+        // Resolve any DNS `host:port` relay entries alongside pre-resolved `relay_addrs`.
+        let mut resolved_relays = opts.relay_addrs.clone();
+        for host in &opts.relay_hosts {
+            let trimmed = host.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(iter) = tokio::net::lookup_host(trimmed).await {
+                for addr in iter {
+                    if !resolved_relays.contains(&addr) {
+                        resolved_relays.push(addr);
+                    }
+                }
+            }
+        }
+
         let cancel = CancellationToken::new();
         let nat = NatCoordinator::start(
             Arc::clone(&magic_socket),
             signaling_rx,
-            opts.relay_addrs.clone(),
+            resolved_relays.clone(),
             cancel.clone(),
         );
 
         // Eagerly register with configured relays so incoming global sessions can reach us immediately.
-        for relay in &opts.relay_addrs {
+        for relay in &resolved_relays {
             let _ = nat.register_with_relay(*relay).await;
         }
 
         let discovery = if opts.enable_mdns {
-            match LanDiscovery::start(
+            match LanDiscovery::start_with_overrides(
                 identity.node_id(),
                 opts.device_name.clone(),
                 listen_addr.port(),
+                &opts.override_lan_addrs,
             ) {
                 Ok(disc) => Some(disc),
                 Err(err) => {
@@ -177,6 +211,9 @@ impl VeloceEndpoint {
         let node = Arc::new(Self {
             identity,
             device_name: opts.device_name,
+            profile: opts.profile,
+            override_lan_addrs: opts.override_lan_addrs,
+            relay_hosts: opts.relay_hosts,
             endpoint,
             magic_socket,
             nat,
@@ -209,6 +246,10 @@ impl VeloceEndpoint {
 
     pub fn device_name(&self) -> &str {
         &self.device_name
+    }
+
+    pub fn profile(&self) -> TransferProfile {
+        self.profile
     }
 
     pub fn listen_addr(&self) -> SocketAddr {
@@ -257,7 +298,8 @@ impl VeloceEndpoint {
         let mut session_token = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut session_token);
 
-        let mut direct_addrs = local_lan_addrs(self.listen_addr.port());
+        let mut direct_addrs =
+            local_lan_addrs_with_overrides(self.listen_addr.port(), &self.override_lan_addrs);
         if let Some(public) = self.nat.public_addr() {
             if !direct_addrs.contains(&public) {
                 direct_addrs.push(public);
@@ -275,6 +317,13 @@ impl VeloceEndpoint {
             ));
         }
 
+        // Preserve DNS `host:port` relay strings first so tickets remain dual-stack portable.
+        for host in &self.relay_hosts {
+            let trimmed = host.trim().to_string();
+            if !trimmed.is_empty() && !relay_hints.contains(&trimmed) {
+                relay_hints.push(trimmed);
+            }
+        }
         for configured_relay in self.nat.relay_addrs() {
             let s = configured_relay.to_string();
             if !relay_hints.contains(&s) {
@@ -332,10 +381,14 @@ impl VeloceEndpoint {
         let streams = parallel_streams.unwrap_or(self.default_parallel_streams);
         let transfer_id = hex::encode(&ticket.merkle_root[..8]);
 
-        // Resolve relay hints from ticket + local endpoint relay config.
+        // Resolve relay hints from ticket + configured DNS relay_hosts + pre-resolved relays.
         let mut relays: Vec<SocketAddr> = Vec::new();
-        for hint in &ticket.relay_hints {
-            if let Ok(resolved) = tokio::net::lookup_host(hint.as_str()).await {
+        for hint in ticket.relay_hints.iter().chain(self.relay_hosts.iter()) {
+            let trimmed = hint.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(resolved) = tokio::net::lookup_host(trimmed).await {
                 for addr in resolved {
                     if !relays.contains(&addr) {
                         relays.push(addr);
@@ -573,7 +626,7 @@ impl VeloceEndpoint {
             );
         }
 
-        let summary = run_receiver_session(
+        let summary = run_receiver_session_with_profile(
             transfer_id.clone(),
             conn.clone(),
             ctrl_send,
@@ -582,6 +635,7 @@ impl VeloceEndpoint {
             manifest,
             output_dir,
             parallel_streams,
+            self.profile,
             ct,
             Some(self.progress_tx.clone()),
             cancel,
@@ -982,7 +1036,7 @@ impl VeloceEndpoint {
                         .expect("cancellations lock poisoned")
                         .insert(transfer_id.clone(), cancel.clone());
                     let ct = Arc::new(Mutex::new(conn_type));
-                    let res = run_receiver_session(
+                    let res = run_receiver_session_with_profile(
                         transfer_id.clone(),
                         conn.clone(),
                         ctrl_send,
@@ -991,6 +1045,7 @@ impl VeloceEndpoint {
                         manifest,
                         output_dir,
                         parallel_streams,
+                        self.profile,
                         ct,
                         Some(self.progress_tx.clone()),
                         cancel,

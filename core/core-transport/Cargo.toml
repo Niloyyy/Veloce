@@ -11,7 +11,7 @@ bytes.workspace = true
 core-protocol = { path = "../core-protocol" }
 core-storage = { path = "../core-storage" }
 hex.workspace = true
-if-addrs.workspace = true
+getifs.workspace = true
 mdns-sd.workspace = true
 postcard.workspace = true
 quinn.workspace = true

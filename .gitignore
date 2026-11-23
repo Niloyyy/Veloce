@@ -7,6 +7,11 @@ Cargo.lock
 /ui/dist-electron
 /ui/release
 /ui/native/*.node
+/mobile/build
+/mobile/.dart_tool
+/mobile/.flutter-plugins*
+/mobile/android/app/src/main/jniLibs
+/mobile/ios/Frameworks
 *.veloce-resume*
 *.part
 .DS_Store

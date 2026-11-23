@@ -7,7 +7,8 @@ pub mod merkle;
 pub use assembler::{ChunkAssembler, ChunkWriteOutcome, ResumeState};
 pub use bitfield::ChunkBitfield;
 pub use chunker::{
-    select_chunk_size, ChunkPayload, ChunkSource, MAX_CHUNK_SIZE, MID_CHUNK_SIZE, MIN_CHUNK_SIZE,
+    select_chunk_size, select_chunk_size_for_profile, ChunkPayload, ChunkSource, MAX_CHUNK_SIZE,
+    MID_CHUNK_SIZE, MIN_CHUNK_SIZE,
 };
 pub use error::{Result, StorageError};
 pub use merkle::MerkleTree;
@@ -25,6 +26,34 @@ mod tests {
         assert_eq!(select_chunk_size(63 * 1024 * 1024), MIN_CHUNK_SIZE);
         assert_eq!(select_chunk_size(64 * 1024 * 1024), MID_CHUNK_SIZE);
         assert_eq!(select_chunk_size(1024 * 1024 * 1024), MAX_CHUNK_SIZE);
+        // Mobile profile strictly caps chunks at 1 MiB regardless of payload size.
+        assert_eq!(
+            select_chunk_size_for_profile(
+                2 * 1024 * 1024 * 1024,
+                core_protocol::TransferProfile::Mobile
+            ),
+            MIN_CHUNK_SIZE
+        );
+    }
+
+    #[test]
+    fn mobile_profile_bypasses_mmap_and_reads_chunks_via_buffered_io() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("mobile_clip.bin");
+        let payload: Vec<u8> = (0..150_000u32).map(|i| ((i * 5) % 251) as u8).collect();
+        fs::write(&file_path, &payload).unwrap();
+
+        let source = ChunkSource::from_paths_for_profile(
+            &[&file_path],
+            core_protocol::TransferProfile::Mobile,
+            Some(2 * 1024 * 1024), // Must be clamped to 1 MiB mobile ceiling.
+        )
+        .unwrap();
+
+        assert!(!source.has_active_mmaps());
+        assert_eq!(source.manifest().chunk_size, MIN_CHUNK_SIZE);
+        let chunk = source.read_chunk(0).unwrap();
+        assert_eq!(chunk.data, payload);
     }
 
     #[test]

@@ -12,8 +12,8 @@ pub use messages::{
 };
 pub use ticket::{SessionTicket, TICKET_PREFIX};
 pub use types::{
-    validate_relative_path, ConnectionType, FileEntry, NodeId, TransferManifest, ALPN_VELOCE,
-    PROTOCOL_VERSION,
+    validate_relative_path, ConnectionType, FileEntry, NodeId, TransferManifest, TransferProfile,
+    ALPN_VELOCE, PROTOCOL_VERSION,
 };
 
 #[cfg(test)]

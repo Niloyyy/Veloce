@@ -1,0 +1,5 @@
+rust_input: crate::api
+rust_root: core/core-mobile-ffi/
+dart_output: mobile/lib/src/rust
+rust_output: core/core-mobile-ffi/src/frb_generated.rs
+dart_entrypoint_class_name: VeloceRustLib

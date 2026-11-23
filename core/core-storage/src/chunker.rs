@@ -3,14 +3,14 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use core_protocol::{validate_relative_path, FileEntry, TransferManifest};
+use core_protocol::{validate_relative_path, FileEntry, TransferManifest, TransferProfile};
 use memmap2::Mmap;
 use rand::RngCore;
 
 use crate::error::{Result, StorageError};
 use crate::merkle::MerkleTree;
 
-/// 1 MiB chunk size for smaller transfers (< 64 MiB).
+/// 1 MiB chunk size for smaller transfers (< 64 MiB) and mobile ceiling.
 pub const MIN_CHUNK_SIZE: u32 = 1024 * 1024;
 /// 2 MiB chunk size for medium transfers (64 MiB .. 1 GiB).
 pub const MID_CHUNK_SIZE: u32 = 2 * 1024 * 1024;
@@ -22,13 +22,19 @@ const LARGE_TRANSFER_THRESHOLD: u64 = 1024 * 1024 * 1024;
 
 /// Dynamically selects an optimal chunk size between 1 MiB and 4 MiB based on total transfer size.
 pub fn select_chunk_size(total_bytes: u64) -> u32 {
-    if total_bytes >= LARGE_TRANSFER_THRESHOLD {
+    select_chunk_size_for_profile(total_bytes, TransferProfile::Desktop)
+}
+
+/// Dynamically selects chunk size capped by `profile.max_chunk_size()` (1 MiB on Mobile, 4 MiB on Desktop).
+pub fn select_chunk_size_for_profile(total_bytes: u64, profile: TransferProfile) -> u32 {
+    let base = if total_bytes >= LARGE_TRANSFER_THRESHOLD {
         MAX_CHUNK_SIZE
     } else if total_bytes >= MEDIUM_TRANSFER_THRESHOLD {
         MID_CHUNK_SIZE
     } else {
         MIN_CHUNK_SIZE
-    }
+    };
+    base.min(profile.max_chunk_size())
 }
 
 /// Chunk payload paired with its BLAKE3 content hash and Merkle inclusion proof.
@@ -56,10 +62,19 @@ pub struct ChunkSource {
 }
 
 impl ChunkSource {
-    /// Scans one or more file or directory paths, builds the BLAKE3 Merkle tree and manifest,
-    /// and prepares zero-copy readers for serving chunks concurrently.
+    /// Scans one or more file or directory paths using the default Desktop profile.
     pub fn from_paths<P: AsRef<Path>>(
         inputs: &[P],
+        chunk_size_override: Option<u32>,
+    ) -> Result<Self> {
+        Self::from_paths_for_profile(inputs, TransferProfile::Desktop, chunk_size_override)
+    }
+
+    /// Scans one or more file or directory paths honoring `TransferProfile` memory constraints
+    /// (bypassing `memmap2` and capping chunks at 1 MiB under `TransferProfile::Mobile`).
+    pub fn from_paths_for_profile<P: AsRef<Path>>(
+        inputs: &[P],
+        profile: TransferProfile,
         chunk_size_override: Option<u32>,
     ) -> Result<Self> {
         if inputs.is_empty() {
@@ -98,7 +113,10 @@ impl ChunkSource {
         deduplicate_relative_paths(&mut collected);
 
         let total_size: u64 = collected.iter().map(|(_, _, sz, _)| *sz).sum();
-        let chunk_size = chunk_size_override.unwrap_or_else(|| select_chunk_size(total_size));
+        let chunk_size = chunk_size_override
+            .map(|c| c.min(profile.max_chunk_size()))
+            .unwrap_or_else(|| select_chunk_size_for_profile(total_size, profile));
+        let use_mmap = profile.use_mmap();
 
         let mut entries = Vec::with_capacity(collected.len());
         let mut handles = Vec::with_capacity(collected.len());
@@ -107,7 +125,11 @@ impl ChunkSource {
 
         for (rel_path, disk_path, size, mode) in collected {
             let file = File::open(&disk_path)?;
-            let mmap = try_map_readonly(&file, size);
+            let mmap = if use_mmap {
+                try_map_readonly(&file, size)
+            } else {
+                None
+            };
             let mut file_hasher = blake3::Hasher::new();
             let first_chunk = next_chunk_index;
             let mut chunk_count: u32 = 0;
@@ -185,15 +207,32 @@ impl ChunkSource {
         })
     }
 
-    /// Async wrapper running indexing on Tokio's blocking pool so the async runtime never stalls.
+    /// Async wrapper running indexing on Tokio's blocking pool (Desktop profile).
     pub async fn from_paths_async(
         inputs: Vec<PathBuf>,
         chunk_size_override: Option<u32>,
     ) -> Result<Arc<Self>> {
-        tokio::task::spawn_blocking(move || Self::from_paths(&inputs, chunk_size_override))
+        Self::from_paths_for_profile_async(inputs, TransferProfile::Desktop, chunk_size_override)
             .await
-            .map_err(|e| StorageError::JoinError(e.to_string()))?
-            .map(Arc::new)
+    }
+
+    /// Async wrapper running indexing with explicit `TransferProfile` (e.g., `Mobile` buffered I/O).
+    pub async fn from_paths_for_profile_async(
+        inputs: Vec<PathBuf>,
+        profile: TransferProfile,
+        chunk_size_override: Option<u32>,
+    ) -> Result<Arc<Self>> {
+        tokio::task::spawn_blocking(move || {
+            Self::from_paths_for_profile(&inputs, profile, chunk_size_override)
+        })
+        .await
+        .map_err(|e| StorageError::JoinError(e.to_string()))?
+        .map(Arc::new)
+    }
+
+    /// Returns whether any source file handle is currently memory-mapped.
+    pub fn has_active_mmaps(&self) -> bool {
+        self.files.iter().any(|f| f.mmap.is_some())
     }
 
     pub fn manifest(&self) -> &TransferManifest {

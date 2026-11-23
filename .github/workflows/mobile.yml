@@ -1,0 +1,96 @@
+name: Mobile & Core CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  rust-core-and-desktop:
+    name: Rust Core, CLI, Relay & Electron Bridge
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Clippy (Workspace)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (core-ffi napi-addon)
+        run: cargo clippy -p core-ffi --features napi-addon -- -D warnings
+      - name: Cargo Test (Workspace)
+        run: cargo test --workspace
+      - name: Build & Smoke-Test Electron napi-rs Addon & UI
+        working-directory: ui
+        run: |
+          npm ci --ignore-scripts
+          npm run build:native
+          npm run test:native
+          npm run typecheck
+          npm run build
+
+  android:
+    name: Flutter Android + Rust core-mobile-ffi (cargo-ndk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.27.x"
+          channel: stable
+      - name: Install cargo-ndk & flutter_rust_bridge_codegen
+        run: |
+          cargo install cargo-ndk --locked
+          cargo install flutter_rust_bridge_codegen --version "^2.13" --locked
+      - name: Generate flutter_rust_bridge bindings
+        run: flutter_rust_bridge_codegen generate
+      - name: Build Android Rust Libraries (16 KB page aligned)
+        run: bash mobile/scripts/build-android-rust.sh release
+      - name: Flutter Analyze & Test
+        working-directory: mobile
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+      - name: Build Android APK
+        working-directory: mobile
+        run: flutter build apk --release
+
+  ios:
+    name: Flutter iOS + Rust core-mobile-ffi (aarch64-apple-ios)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.27.x"
+          channel: stable
+      - name: Install flutter_rust_bridge_codegen
+        run: cargo install flutter_rust_bridge_codegen --version "^2.13" --locked
+      - name: Generate flutter_rust_bridge bindings
+        run: flutter_rust_bridge_codegen generate
+      - name: Build iOS Static Library & XCFramework
+        run: bash mobile/scripts/build-ios-rust.sh
+      - name: Flutter Analyze & Test
+        working-directory: mobile
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+      - name: Build iOS (no-codesign)
+        working-directory: mobile
+        run: flutter build ios --release --no-codesign

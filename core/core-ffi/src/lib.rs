@@ -28,8 +28,7 @@ mod tests {
             bind_addr: Some("127.0.0.1:0".into()),
             enable_mdns: Some(false),
             parallel_streams: Some(4),
-            relay_addrs: None,
-            force_relay: Some(false),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -39,8 +38,7 @@ mod tests {
             bind_addr: Some("127.0.0.1:0".into()),
             enable_mdns: Some(false),
             parallel_streams: Some(4),
-            relay_addrs: None,
-            force_relay: Some(false),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -125,8 +123,7 @@ mod tests {
             bind_addr: Some("127.0.0.1:0".into()),
             enable_mdns: Some(false),
             parallel_streams: Some(4),
-            relay_addrs: None,
-            force_relay: Some(false),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -136,8 +133,7 @@ mod tests {
             bind_addr: Some("127.0.0.1:0".into()),
             enable_mdns: Some(false),
             parallel_streams: Some(4),
-            relay_addrs: None,
-            force_relay: Some(false),
+            ..Default::default()
         })
         .await
         .unwrap();

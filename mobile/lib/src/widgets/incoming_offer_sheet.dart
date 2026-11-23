@@ -1,0 +1,125 @@
+import 'package:flutter/material.dart';
+
+import '../rust/api.dart';
+import '../utils/formatters.dart';
+import 'connection_badge.dart';
+
+class IncomingOfferSheet extends StatelessWidget {
+  const IncomingOfferSheet({
+    super.key,
+    required this.offer,
+    required this.onAccept,
+    required this.onReject,
+  });
+
+  final MobileEventIncomingOffer offer;
+  final VoidCallback onAccept;
+  final VoidCallback onReject;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'INCOMING TRANSFER',
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                              color: Theme.of(context).colorScheme.primary,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.8,
+                            ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        offer.senderName,
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                      Text(
+                        'Node ID: ${offer.senderShortId}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+                ConnectionBadge(connectionType: offer.connectionType),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Text(
+              '${offer.fileCount} item(s) • ${formatBytes(offer.totalSize)} • End-to-End TLS 1.3',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 10),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 160),
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: offer.files.length > 6 ? 7 : offer.files.length,
+                itemBuilder: (context, idx) {
+                  if (idx == 6) {
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Text(
+                        '+ ${offer.files.length - 6} more file(s)',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    );
+                  }
+                  final file = offer.files[idx];
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 3),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            file.relativePath,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          formatBytes(file.size),
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 18),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: onReject,
+                    child: const Text('Decline'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: onAccept,
+                    icon: const Icon(Icons.verified_user_rounded, size: 18),
+                    label: const Text('Accept'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

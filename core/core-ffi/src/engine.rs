@@ -3,11 +3,11 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use core_protocol::{ConnectionType, NodeId, SessionTicket};
+use core_protocol::{ConnectionType, NodeId, SessionTicket, TransferProfile};
 use core_storage::ChunkSource;
 use core_transport::{
     DiscoveryEvent, EndpointOptions, IncomingOfferDecision, LocalPeer, TransferDirection,
-    VeloceEndpoint, DEFAULT_PARALLEL_STREAMS,
+    VeloceEndpoint,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -38,14 +38,21 @@ pub enum FfiError {
 pub type Result<T> = std::result::Result<T, FfiError>;
 
 /// Engine initialization configuration passed across the FFI boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineConfigDto {
     pub device_name: String,
     pub bind_addr: Option<String>,
     pub enable_mdns: Option<bool>,
     pub parallel_streams: Option<u32>,
+    /// Relay endpoints specified as `host:port` DNS names or `ip:port` socket addresses.
     pub relay_addrs: Option<Vec<String>>,
+    /// Runtime memory & concurrency profile (`Desktop` vs `Mobile`).
+    #[serde(default)]
+    pub profile: Option<TransferProfile>,
+    /// Optional platform-discovered LAN IP addresses (e.g., Android API 30+ Wi-Fi IP).
+    #[serde(default)]
+    pub override_lan_addrs: Option<Vec<String>>,
     pub force_relay: Option<bool>,
 }
 
@@ -211,6 +218,7 @@ struct ManagedTransfer {
 /// resumable pause/resume state, non-blocking background transfer tasks, and a unified event stream.
 pub struct VeloceEngine {
     endpoint: Arc<VeloceEndpoint>,
+    profile: TransferProfile,
     pending_offers: Arc<Mutex<HashMap<String, oneshot::Sender<IncomingOfferDecision>>>>,
     managed_transfers: Arc<Mutex<HashMap<String, ManagedTransfer>>>,
     events_tx: broadcast::Sender<EngineEvent>,
@@ -222,6 +230,7 @@ impl VeloceEngine {
     /// Initializes the underlying QUIC BBR endpoint, mDNS discovery, NAT/relay coordinator,
     /// and background event aggregation tasks.
     pub async fn init(config: EngineConfigDto) -> Result<Arc<Self>> {
+        let profile = config.profile.unwrap_or(TransferProfile::Desktop);
         let bind_addr = match config.bind_addr {
             Some(ref s) if !s.trim().is_empty() => s
                 .parse::<SocketAddr>()
@@ -229,18 +238,26 @@ impl VeloceEngine {
             _ => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
         };
 
-        let mut relay_addrs = Vec::new();
+        let mut relay_hosts = Vec::new();
         if let Some(relays) = config.relay_addrs {
             for r in relays {
                 let trimmed = r.trim();
+                if !trimmed.is_empty() && !relay_hosts.iter().any(|h| h == trimmed) {
+                    relay_hosts.push(trimmed.to_string());
+                }
+            }
+        }
+
+        let mut override_lan_addrs = Vec::new();
+        if let Some(overrides) = config.override_lan_addrs {
+            for raw in overrides {
+                let trimmed = raw.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
-                if let Ok(resolved) = tokio::net::lookup_host(trimmed).await {
-                    for addr in resolved {
-                        if !relay_addrs.contains(&addr) {
-                            relay_addrs.push(addr);
-                        }
+                if let Ok(ip) = trimmed.parse::<IpAddr>() {
+                    if !override_lan_addrs.contains(&ip) {
+                        override_lan_addrs.push(ip);
                     }
                 }
             }
@@ -249,7 +266,7 @@ impl VeloceEngine {
         let parallel_streams = config
             .parallel_streams
             .map(|n| (n as usize).clamp(1, 32))
-            .unwrap_or(DEFAULT_PARALLEL_STREAMS);
+            .unwrap_or_else(|| profile.default_parallel_streams());
 
         let opts = EndpointOptions {
             bind_addr,
@@ -260,7 +277,10 @@ impl VeloceEngine {
             },
             enable_mdns: config.enable_mdns.unwrap_or(true),
             parallel_streams,
-            relay_addrs,
+            relay_addrs: Vec::new(),
+            relay_hosts,
+            profile,
+            override_lan_addrs,
             force_relay: config.force_relay.unwrap_or(false),
         };
 
@@ -389,6 +409,7 @@ impl VeloceEngine {
 
         Ok(Arc::new(Self {
             endpoint,
+            profile,
             pending_offers,
             managed_transfers: Arc::new(Mutex::new(HashMap::new())),
             events_tx,
@@ -455,7 +476,8 @@ impl VeloceEngine {
         }
 
         let path_bufs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-        let source = ChunkSource::from_paths_async(path_bufs, None).await?;
+        let source =
+            ChunkSource::from_paths_for_profile_async(path_bufs, self.profile, None).await?;
         let manifest = source.manifest();
 
         let hosted = self.endpoint.host_session(
