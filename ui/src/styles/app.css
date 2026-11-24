@@ -820,3 +820,17 @@ p {
   accent-color: var(--accent);
   cursor: pointer;
 }
+
+.panel-header-actions,
+.ticket-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.alert-banner-dismissible {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}

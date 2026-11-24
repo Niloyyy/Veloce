@@ -58,6 +58,21 @@ pub struct HostedSession {
     pub cancel: CancellationToken,
 }
 
+/// Event emitted when an incoming or hosted transfer session finishes or fails on the endpoint.
+#[derive(Debug, Clone)]
+pub enum EndpointSessionOutcome {
+    Completed {
+        transfer_id: String,
+        direction: crate::transfer::TransferDirection,
+        summary: TransferSummary,
+    },
+    Failed {
+        transfer_id: String,
+        direction: crate::transfer::TransferDirection,
+        error: String,
+    },
+}
+
 /// Event emitted when a transfer's underlying transport path transitions (e.g., Relayed -> Direct-P2P).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransferConnectionChanged {
@@ -83,6 +98,7 @@ pub struct VeloceEndpoint {
     hosted_sessions: Arc<RwLock<HashMap<[u8; 16], HostedSession>>>,
     active_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
     progress_tx: mpsc::UnboundedSender<TransferProgress>,
+    outcomes_tx: mpsc::UnboundedSender<EndpointSessionOutcome>,
     conn_changed_tx: broadcast::Sender<TransferConnectionChanged>,
     default_parallel_streams: usize,
     cancel: CancellationToken,
@@ -127,6 +143,7 @@ impl Default for EndpointOptions {
 pub struct EndpointChannels {
     pub incoming_offers: mpsc::UnboundedReceiver<IncomingOffer>,
     pub progress_rx: mpsc::UnboundedReceiver<TransferProgress>,
+    pub outcomes_rx: mpsc::UnboundedReceiver<EndpointSessionOutcome>,
     pub conn_changed_rx: broadcast::Receiver<TransferConnectionChanged>,
 }
 
@@ -202,6 +219,7 @@ impl VeloceEndpoint {
 
         let (offers_tx, incoming_offers) = mpsc::unbounded_channel();
         let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+        let (outcomes_tx, outcomes_rx) = mpsc::unbounded_channel();
         let (conn_changed_tx, conn_changed_rx) = broadcast::channel(64);
         let hosted_sessions: Arc<RwLock<HashMap<[u8; 16], HostedSession>>> =
             Arc::new(RwLock::new(HashMap::new()));
@@ -223,6 +241,7 @@ impl VeloceEndpoint {
             hosted_sessions,
             active_cancellations,
             progress_tx,
+            outcomes_tx,
             conn_changed_tx,
             default_parallel_streams: opts.parallel_streams.max(1),
             cancel,
@@ -235,6 +254,7 @@ impl VeloceEndpoint {
             EndpointChannels {
                 incoming_offers,
                 progress_rx,
+                outcomes_rx,
                 conn_changed_rx,
             },
         ))
@@ -306,7 +326,7 @@ impl VeloceEndpoint {
             }
         }
         for addr in extra_addrs {
-            if !direct_addrs.contains(&addr) {
+            if !addr.ip().is_unspecified() && !direct_addrs.contains(&addr) {
                 direct_addrs.push(addr);
             }
         }
@@ -365,6 +385,54 @@ impl VeloceEndpoint {
             .insert(transfer_id, cancel);
 
         Ok(hosted)
+    }
+
+    /// Async session hoster that refreshes relay registrations (surviving mobile Wi-Fi <-> cellular
+    /// transitions) and performs RFC 5389 public STUN discovery when needed before encoding the ticket.
+    pub async fn host_session_async(
+        &self,
+        source: Arc<ChunkSource>,
+        extra_addrs: Vec<SocketAddr>,
+        relay_hints: Vec<String>,
+        allow_public_stun: bool,
+    ) -> Result<HostedSession> {
+        let mut active_relays: Vec<SocketAddr> = self.nat.relay_addrs();
+        for hint in relay_hints.iter().chain(self.relay_hosts.iter()) {
+            let trimmed = hint.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(Ok(resolved)) =
+                tokio::time::timeout(Duration::from_millis(800), tokio::net::lookup_host(trimmed))
+                    .await
+            {
+                for addr in resolved {
+                    self.nat.add_relay(addr);
+                    if !active_relays.contains(&addr) {
+                        active_relays.push(addr);
+                    }
+                }
+            }
+        }
+
+        for relay in &active_relays {
+            let _ = self.nat.register_with_relay(*relay).await;
+            if self.nat.public_addr().is_none() {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(600),
+                    self.nat.discover_public_addr(*relay),
+                )
+                .await;
+            }
+        }
+
+        // If no relay gave us a reflexive public address, try standard RFC 5389 STUN on our UDP socket
+        // so direct Cone-NAT WAN transfers can connect without manual port-forwarding.
+        if allow_public_stun && self.nat.public_addr().is_none() && !self.magic_socket.is_force_relay() {
+            let _ = self.nat.discover_public_addr_rfc5389().await;
+        }
+
+        self.host_session(source, extra_addrs, relay_hints)
     }
 
     /// Smart global session joiner:
@@ -744,8 +812,24 @@ impl VeloceEndpoint {
         false
     }
 
-    /// Cancels an active outgoing or incoming transfer by ID.
+    /// Cancels an active outgoing, incoming, or hosted transfer by ID and revokes any matching ticket.
     pub fn cancel_transfer(&self, transfer_id: &str) -> bool {
+        let mut cancelled_any = false;
+        {
+            let mut sessions = self
+                .hosted_sessions
+                .write()
+                .expect("hosted_sessions lock poisoned");
+            sessions.retain(|_, hosted| {
+                if hosted.transfer_id == transfer_id {
+                    hosted.cancel.cancel();
+                    cancelled_any = true;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         if let Some(token) = self
             .active_cancellations
             .lock()
@@ -753,10 +837,9 @@ impl VeloceEndpoint {
             .remove(transfer_id)
         {
             token.cancel();
-            true
-        } else {
-            false
+            cancelled_any = true;
         }
+        cancelled_any
     }
 
     /// Stops accepting new connections and shuts down discovery & NAT tasks.
@@ -930,6 +1013,12 @@ impl VeloceEndpoint {
             sm.on_send(&reply_hello)?;
             write_frame(&mut ctrl_send, &reply_hello, MAX_CONTROL_FRAME_SIZE).await?;
 
+            let _ = self.conn_changed_tx.send(TransferConnectionChanged {
+                transfer_id: hosted.transfer_id.clone(),
+                peer_node_id: authed_peer,
+                connection_type: conn_type,
+            });
+
             let ct = Arc::new(Mutex::new(conn_type));
             let watch_cancel = hosted.cancel.child_token();
             let watcher = self.spawn_path_upgrade_watcher(
@@ -938,8 +1027,10 @@ impl VeloceEndpoint {
                 Arc::clone(&ct),
                 watch_cancel.clone(),
             );
+            let tid = hosted.transfer_id.clone();
+            let is_paused_ref = Arc::clone(&hosted.paused);
             let res = run_sender_session(
-                hosted.transfer_id.clone(),
+                tid.clone(),
                 conn.clone(),
                 ctrl_send,
                 ctrl_recv,
@@ -953,6 +1044,23 @@ impl VeloceEndpoint {
             .await;
             watch_cancel.cancel();
             watcher.abort();
+            match &res {
+                Ok(summary) => {
+                    let _ = self.outcomes_tx.send(EndpointSessionOutcome::Completed {
+                        transfer_id: tid,
+                        direction: crate::transfer::TransferDirection::Send,
+                        summary: summary.clone(),
+                    });
+                }
+                Err(err) if !is_paused_ref.load(Ordering::Acquire) => {
+                    let _ = self.outcomes_tx.send(EndpointSessionOutcome::Failed {
+                        transfer_id: tid,
+                        direction: crate::transfer::TransferDirection::Send,
+                        error: err.to_string(),
+                    });
+                }
+                Err(_) => {}
+            }
             res?;
         } else {
             let mut sm = HandshakeStateMachine::new(SessionRole::Receiver, None);
@@ -1035,6 +1143,11 @@ impl VeloceEndpoint {
                         .lock()
                         .expect("cancellations lock poisoned")
                         .insert(transfer_id.clone(), cancel.clone());
+                    let _ = self.conn_changed_tx.send(TransferConnectionChanged {
+                        transfer_id: transfer_id.clone(),
+                        peer_node_id: authed_peer,
+                        connection_type: conn_type,
+                    });
                     let ct = Arc::new(Mutex::new(conn_type));
                     let res = run_receiver_session_with_profile(
                         transfer_id.clone(),
@@ -1055,6 +1168,22 @@ impl VeloceEndpoint {
                         .lock()
                         .expect("cancellations lock poisoned")
                         .remove(&transfer_id);
+                    match &res {
+                        Ok(summary) => {
+                            let _ = self.outcomes_tx.send(EndpointSessionOutcome::Completed {
+                                transfer_id,
+                                direction: crate::transfer::TransferDirection::Receive,
+                                summary: summary.clone(),
+                            });
+                        }
+                        Err(err) => {
+                            let _ = self.outcomes_tx.send(EndpointSessionOutcome::Failed {
+                                transfer_id,
+                                direction: crate::transfer::TransferDirection::Receive,
+                                error: err.to_string(),
+                            });
+                        }
+                    }
                     res?;
                 }
                 IncomingOfferDecision::Reject { reason } => {

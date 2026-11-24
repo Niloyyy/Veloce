@@ -6,11 +6,20 @@ import { QrCodeCard } from "./QrCodeCard";
 interface SendViewProps {
   peers: PeerDto[];
   activeSession: StartSessionResult | null;
+  hasRelay: boolean;
   busy: boolean;
   onStartSession: (paths: string[], targetPeerNodeId?: string) => Promise<void>;
+  onStopSharing: () => void;
 }
 
-export function SendView({ peers, activeSession, busy, onStartSession }: SendViewProps) {
+export function SendView({
+  peers,
+  activeSession,
+  hasRelay,
+  busy,
+  onStartSession,
+  onStopSharing,
+}: SendViewProps) {
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [dragging, setDragging] = useState(false);
 
@@ -107,7 +116,13 @@ export function SendView({ peers, activeSession, busy, onStartSession }: SendVie
         )}
       </div>
 
-      {activeSession && <QrCodeCard session={activeSession} />}
+      {activeSession && (
+        <QrCodeCard
+          session={activeSession}
+          hasRelay={hasRelay}
+          onStopSharing={onStopSharing}
+        />
+      )}
 
       <section className="panel">
         <div className="panel-header">

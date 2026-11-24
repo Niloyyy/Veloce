@@ -134,6 +134,59 @@ impl NatCoordinator {
         Ok(observed)
     }
 
+    /// Queries standard RFC 5389 public STUN servers (`stun.cloudflare.com:3478`,
+    /// `stun.l.google.com:19302`) on the shared QUIC UDP socket so global tickets include
+    /// our reflexive public `IP:port` even when no `veloce-relay` server is configured.
+    pub async fn discover_public_addr_rfc5389(&self) -> Option<SocketAddr> {
+        const PUBLIC_STUN_HOSTS: &[&str] = &[
+            "stun.cloudflare.com:3478",
+            "stun.l.google.com:19302",
+        ];
+
+        for host in PUBLIC_STUN_HOSTS {
+            let Ok(Ok(mut resolved)) =
+                tokio::time::timeout(Duration::from_millis(600), tokio::net::lookup_host(*host))
+                    .await
+            else {
+                continue;
+            };
+            let Some(stun_addr) = resolved.find(|a| a.is_ipv4()) else {
+                continue;
+            };
+
+            let tx_id = rand::thread_rng().next_u64();
+            let (tx, rx) = oneshot::channel();
+            self.pending_stun
+                .lock()
+                .expect("pending_stun lock poisoned")
+                .insert(tx_id, tx);
+
+            // 20-byte RFC 5389 Binding Request:
+            // [0x00, 0x01] Binding Request | [0x00, 0x00] Length 0
+            // [0x21, 0x12, 0xA4, 0x42] Magic Cookie | 12-byte Transaction ID (4 random + 8 tx_id)
+            let mut pkt = [0u8; 20];
+            pkt[0] = 0x00;
+            pkt[1] = 0x01;
+            pkt[4..8].copy_from_slice(&0x2112_A442u32.to_be_bytes());
+            rand::thread_rng().fill_bytes(&mut pkt[8..12]);
+            pkt[12..20].copy_from_slice(&tx_id.to_be_bytes());
+
+            if self.socket.send_raw_datagram(stun_addr, &pkt).await.is_ok() {
+                if let Ok(Ok(observed)) = tokio::time::timeout(Duration::from_millis(750), rx).await
+                {
+                    *self.public_addr.write().expect("public_addr lock poisoned") = Some(observed);
+                    return Some(observed);
+                }
+            }
+            self.pending_stun
+                .lock()
+                .expect("pending_stun lock poisoned")
+                .remove(&tx_id);
+        }
+
+        None
+    }
+
     /// Registers this node's Ed25519 `NodeId` and LAN addresses with a stateless relay server.
     pub async fn register_with_relay(&self, relay_addr: SocketAddr) -> Result<()> {
         let port = self.socket.local_addr()?.port();

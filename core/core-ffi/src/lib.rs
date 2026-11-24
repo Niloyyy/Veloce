@@ -110,6 +110,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hosted_sender_and_lan_push_receiver_both_emit_completed_events() {
+        let src_dir = tempdir().unwrap();
+        let dst_pull = tempdir().unwrap();
+        let dst_push = tempdir().unwrap();
+
+        let payload: Vec<u8> = (0..180_000u32).map(|i| ((i * 29) % 251) as u8).collect();
+        let src_file = src_dir.path().join("both_directions.bin");
+        fs::write(&src_file, &payload).unwrap();
+
+        let sender = VeloceEngine::init(EngineConfigDto {
+            device_name: "SenderNode".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
+            enable_mdns: Some(false),
+            parallel_streams: Some(4),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let receiver = VeloceEngine::init(EngineConfigDto {
+            device_name: "ReceiverNode".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
+            enable_mdns: Some(false),
+            parallel_streams: Some(4),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let mut sender_events = sender.subscribe_events();
+        let started = sender
+            .start_session(vec![src_file.display().to_string()], None, vec![])
+            .await
+            .unwrap();
+
+        // Ensure unspecified 0.0.0.0 addresses are never embedded in tickets.
+        let preview = VeloceEngine::parse_ticket(&started.ticket_code).unwrap();
+        assert!(preview
+            .direct_addrs
+            .iter()
+            .all(|a| !a.starts_with("0.0.0.0:")));
+
+        let _joined = receiver
+            .join_session(
+                started.ticket_code.clone(),
+                dst_pull.path().display().to_string(),
+                Some(4),
+            )
+            .await
+            .unwrap();
+
+        // Verify the hosted SENDER also receives EngineEvent::TransferCompleted!
+        let mut sender_completed = false;
+        let deadline = tokio::time::sleep(Duration::from_secs(10));
+        tokio::pin!(deadline);
+        while !sender_completed {
+            tokio::select! {
+                _ = &mut deadline => panic!("timed out waiting for hosted sender TransferCompleted"),
+                evt = sender_events.recv() => {
+                    if let EngineEvent::TransferCompleted { direction, total_bytes, .. } = evt.unwrap() {
+                        if direction == "send" {
+                            assert_eq!(total_bytes, payload.len() as u64);
+                            sender_completed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        let _ = dst_push;
+        sender.shutdown();
+        receiver.shutdown();
+    }
+
+    #[tokio::test]
     async fn engine_pause_and_resume_completes_from_saved_state() {
         let src_dir = tempdir().unwrap();
         let dst_dir = tempdir().unwrap();

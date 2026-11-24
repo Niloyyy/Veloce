@@ -11,8 +11,8 @@ pub use discovery::{
     LanDiscovery, LocalPeer, MDNS_SERVICE_TYPE,
 };
 pub use endpoint::{
-    classify_socket_addr, EndpointChannels, EndpointOptions, HostedSession, IncomingOffer,
-    IncomingOfferDecision, TransferConnectionChanged, VeloceEndpoint,
+    classify_socket_addr, EndpointChannels, EndpointOptions, EndpointSessionOutcome, HostedSession,
+    IncomingOffer, IncomingOfferDecision, TransferConnectionChanged, VeloceEndpoint,
 };
 pub use error::{Result, TransportError};
 pub use identity::{

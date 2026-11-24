@@ -1,7 +1,7 @@
 name: veloce_mobile
 description: Veloce Cross-Platform Local & Global P2P File Transfer (Flutter + Rust QUIC BBR)
 publish_to: 'none'
-version: 0.1.0+1
+version: 0.1.1+2
 
 environment:
   sdk: '>=3.5.0 <4.0.0'

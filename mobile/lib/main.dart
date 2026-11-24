@@ -150,12 +150,28 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
                         ),
                       ],
                     ),
+                  if (_controller.actionError != null)
+                    MaterialBanner(
+                      content: Text(_controller.actionError!),
+                      actions: [
+                        TextButton(
+                          onPressed: _controller.clearActionError,
+                          child: const Text('Dismiss'),
+                        ),
+                      ],
+                    ),
                   Expanded(
                     child: IndexedStack(
                       index: _tabIndex,
                       children: [
-                        SendTab(controller: _controller),
-                        ReceiveTab(controller: _controller),
+                        SendTab(
+                          controller: _controller,
+                          onSwitchToTransfers: () => setState(() => _tabIndex = 2),
+                        ),
+                        ReceiveTab(
+                          controller: _controller,
+                          onJoinedSession: () => setState(() => _tabIndex = 2),
+                        ),
                         TransfersTab(controller: _controller),
                       ],
                     ),

@@ -5,6 +5,8 @@ import {
   Shield,
   SlidersHorizontal,
   Sun,
+  Trash2,
+  X,
   Zap,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -26,6 +28,56 @@ import type {
 type ActiveTab = "send" | "receive";
 type ThemeMode = "dark" | "light";
 
+const HISTORY_STORAGE_KEY = "veloce.desktopTransferHistory";
+
+function humanizeError(raw: unknown): string {
+  const msg = raw instanceof Error ? raw.message : String(raw);
+  if (msg.includes("could not reach peer directly or via any configured relay")) {
+    return (
+      "Could not reach sender over LAN or Direct P2P. Ensure the sender still has Veloce open, " +
+      "or configure a Veloce Relay server (host:port) in Settings for cellular / strict NAT networks."
+    );
+  }
+  return msg;
+}
+
+function loadSavedHistory(): Record<string, TransferRecord> {
+  try {
+    const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as TransferRecord[];
+    if (!Array.isArray(parsed)) return {};
+    const out: Record<string, TransferRecord> = {};
+    for (const item of parsed) {
+      if (item && typeof item.transferId === "string" && item.transferId.length > 0) {
+        out[item.transferId] = {
+          ...item,
+          status: item.status === "active" ? "cancelled" : item.status,
+          speedBytesPerSec: 0,
+          etaSeconds: 0,
+        };
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function persistHistory(records: Record<string, TransferRecord>): void {
+  try {
+    const finished = Object.values(records)
+      .filter(
+        (r) =>
+          r.status === "completed" || r.status === "failed" || r.status === "cancelled",
+      )
+      .slice(-100);
+    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(finished));
+  } catch {
+    // Ignore storage quota errors.
+  }
+}
+
 export function App() {
   const [tab, setTab] = useState<ActiveTab>("send");
   const [theme, setTheme] = useState<ThemeMode>("dark");
@@ -42,7 +94,9 @@ export function App() {
   const [peers, setPeers] = useState<PeerDto[]>([]);
   const [outputDir, setOutputDir] = useState<string>("");
   const [activeSession, setActiveSession] = useState<StartSessionResult | null>(null);
-  const [transfers, setTransfers] = useState<Record<string, TransferRecord>>({});
+  const [transfers, setTransfers] = useState<Record<string, TransferRecord>>(() =>
+    loadSavedHistory(),
+  );
   const [pendingOffer, setPendingOffer] = useState<IncomingOfferEvent | null>(null);
   const [busy, setBusy] = useState(false);
   const [bannerError, setBannerError] = useState<string | null>(null);
@@ -50,6 +104,10 @@ export function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  useEffect(() => {
+    persistHistory(transfers);
+  }, [transfers]);
 
   useEffect(() => {
     if (!window.veloce) {
@@ -121,7 +179,9 @@ export function App() {
               transferId: evt.transferId,
               label:
                 existing?.label ??
-                (evt.direction === "send" ? `Sending #${evt.transferId}` : `Receiving #${evt.transferId}`),
+                (evt.direction === "send"
+                  ? `Sending #${evt.transferId}`
+                  : `Receiving #${evt.transferId}`),
               direction: evt.direction,
               status: "active",
               bytesTransferred: evt.bytesTransferred,
@@ -172,7 +232,11 @@ export function App() {
             ...prev,
             [evt.transferId]: {
               transferId: evt.transferId,
-              label: existing?.label ?? `Transfer #${evt.transferId}`,
+              label:
+                existing?.label ??
+                (evt.direction === "send"
+                  ? `Sent #${evt.transferId}`
+                  : `Received #${evt.transferId}`),
               direction: evt.direction,
               status: "completed",
               bytesTransferred: evt.totalBytes,
@@ -195,6 +259,7 @@ export function App() {
         setTransfers((prev) => {
           const existing = prev[evt.transferId];
           const isCancel = evt.error.toLowerCase().includes("cancel");
+          const friendly = humanizeError(evt.error);
           return {
             ...prev,
             [evt.transferId]: {
@@ -210,7 +275,7 @@ export function App() {
               speedHistory: existing?.speedHistory ?? [],
               etaSeconds: 0,
               connectionType: existing?.connectionType ?? "LAN",
-              error: evt.error,
+              error: friendly,
             },
           };
         });
@@ -227,8 +292,9 @@ export function App() {
         targetPeerNodeId,
         relayHints: settings.relayAddrs.length > 0 ? settings.relayAddrs : undefined,
       });
-      setActiveSession(res);
-      if (targetPeerNodeId) {
+      if (!targetPeerNodeId) {
+        setActiveSession(res);
+      } else {
         const label =
           res.fileCount === 1
             ? res.files[0]?.relativePath ?? "File"
@@ -252,13 +318,24 @@ export function App() {
         }));
       }
     } catch (err) {
-      setBannerError(err instanceof Error ? err.message : String(err));
+      setBannerError(humanizeError(err));
     } finally {
       setBusy(false);
     }
   };
 
-  const handleJoinSession = async (ticketCode: string) => {
+  const handleStopSharing = async () => {
+    if (!activeSession) return;
+    const tid = activeSession.transferId;
+    setActiveSession(null);
+    try {
+      await window.veloce?.cancelTransfer(tid);
+    } catch {
+      // Ignore cancellation errors.
+    }
+  };
+
+  const handleJoinSession = async (ticketCode: string): Promise<boolean> => {
     setBusy(true);
     setBannerError(null);
     try {
@@ -284,8 +361,10 @@ export function App() {
           connectionType: "Direct-P2P",
         },
       }));
+      return true;
     } catch (err) {
-      setBannerError(err instanceof Error ? err.message : String(err));
+      setBannerError(humanizeError(err));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -312,6 +391,7 @@ export function App() {
       setSettings(result.settings);
       setStatus(result.status);
       setOutputDir(result.settings.downloadDir);
+      setActiveSession(null);
       const refreshedPeers = await window.veloce.listLocalPeers();
       setPeers(refreshedPeers);
     } finally {
@@ -355,18 +435,75 @@ export function App() {
   };
 
   const handleResumeTransfer = async (transferId: string) => {
+    setBannerError(null);
     try {
-      await window.veloce?.resumeTransfer(transferId);
+      const ok = await window.veloce?.resumeTransfer(transferId);
+      if (ok) {
+        setTransfers((prev) => {
+          const existing = prev[transferId];
+          if (!existing) return prev;
+          return {
+            ...prev,
+            [transferId]: { ...existing, status: "active", error: undefined },
+          };
+        });
+      }
     } catch (err) {
-      setBannerError(err instanceof Error ? err.message : String(err));
+      setBannerError(humanizeError(err));
     }
   };
 
   const handleCancelTransfer = async (transferId: string) => {
     await window.veloce?.cancelTransfer(transferId);
+    if (activeSession?.transferId === transferId) {
+      setActiveSession(null);
+    }
+    setTransfers((prev) => {
+      const existing = prev[transferId];
+      if (!existing) return prev;
+      return {
+        ...prev,
+        [transferId]: {
+          ...existing,
+          status: "cancelled",
+          speedBytesPerSec: 0,
+          etaSeconds: 0,
+        },
+      };
+    });
+  };
+
+  const handleRemoveTransfer = async (transferId: string) => {
+    const existing = transfers[transferId];
+    if (existing && (existing.status === "active" || existing.status === "paused")) {
+      await window.veloce?.cancelTransfer(transferId);
+    }
+    if (activeSession?.transferId === transferId) {
+      setActiveSession(null);
+    }
+    setTransfers((prev) => {
+      const next = { ...prev };
+      delete next[transferId];
+      return next;
+    });
+  };
+
+  const handleClearHistory = () => {
+    setTransfers((prev) => {
+      const next: Record<string, TransferRecord> = {};
+      for (const [id, tr] of Object.entries(prev)) {
+        if (tr.status === "active" || tr.status === "paused") {
+          next[id] = tr;
+        }
+      }
+      return next;
+    });
   };
 
   const transferList = Object.values(transfers).reverse();
+  const hasFinishedTransfers = transferList.some(
+    (tr) => tr.status === "completed" || tr.status === "failed" || tr.status === "cancelled",
+  );
 
   return (
     <div className="app-shell">
@@ -413,7 +550,19 @@ export function App() {
       {status && !status.ready && status.error && (
         <div className="alert-banner">{status.error}</div>
       )}
-      {bannerError && <div className="alert-banner">{bannerError}</div>}
+      {bannerError && (
+        <div className="alert-banner alert-banner-dismissible">
+          <span>{bannerError}</span>
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label="Dismiss error"
+            onClick={() => setBannerError(null)}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       <nav className="tab-bar" role="tablist">
         <button
@@ -444,8 +593,10 @@ export function App() {
             <SendView
               peers={peers}
               activeSession={activeSession}
+              hasRelay={settings.relayAddrs.length > 0}
               busy={busy}
               onStartSession={handleStartSession}
+              onStopSharing={handleStopSharing}
             />
           ) : (
             <ReceiveView
@@ -461,7 +612,20 @@ export function App() {
           <div className="panel telemetry-panel">
             <div className="panel-header">
               <h3>Live Transfers</h3>
-              <span className="muted-xs">{transferList.length} session(s)</span>
+              <div className="panel-header-actions">
+                <span className="muted-xs">{transferList.length} session(s)</span>
+                {hasFinishedTransfers && (
+                  <button
+                    className="btn-secondary btn-sm"
+                    type="button"
+                    title="Clear completed, failed, and cancelled transfers"
+                    onClick={handleClearHistory}
+                  >
+                    <Trash2 size={13} />
+                    <span>Clear History</span>
+                  </button>
+                )}
+              </div>
             </div>
 
             {transferList.length === 0 ? (
@@ -478,6 +642,7 @@ export function App() {
                     onPause={handlePauseTransfer}
                     onResume={handleResumeTransfer}
                     onCancel={handleCancelTransfer}
+                    onRemove={handleRemoveTransfer}
                   />
                 ))}
               </div>

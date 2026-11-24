@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -42,9 +43,59 @@ class TransferItem {
   final String? error;
   final List<String> outputPaths;
 
+  bool get isTerminal =>
+      status == TransferStatus.completed ||
+      status == TransferStatus.failed ||
+      status == TransferStatus.cancelled;
+
   double get progress => totalBytes > 0
       ? (bytesTransferred / totalBytes).clamp(0.0, 1.0)
       : (status == TransferStatus.completed ? 1.0 : 0.0);
+
+  Map<String, dynamic> toJson() => {
+        'transferId': transferId,
+        'label': label,
+        'direction': direction,
+        'status': status.name,
+        'bytesTransferred': bytesTransferred,
+        'totalBytes': totalBytes,
+        'chunksVerified': chunksVerified,
+        'totalChunks': totalChunks,
+        'speedBytesPerSec': speedBytesPerSec,
+        'etaSeconds': etaSeconds,
+        'connectionType': connectionType,
+        'error': error,
+        'outputPaths': outputPaths,
+      };
+
+  factory TransferItem.fromJson(Map<String, dynamic> json) {
+    final statusName = json['status'] as String? ?? 'failed';
+    final parsedStatus = TransferStatus.values.firstWhere(
+      (s) => s.name == statusName,
+      orElse: () => TransferStatus.failed,
+    );
+    // Any transfer that was still active when the app closed is treated as cancelled/interrupted.
+    final safeStatus =
+        parsedStatus == TransferStatus.active ? TransferStatus.cancelled : parsedStatus;
+    return TransferItem(
+      transferId: json['transferId'] as String? ?? '',
+      label: json['label'] as String? ?? 'Transfer',
+      direction: json['direction'] as String? ?? 'receive',
+      status: safeStatus,
+      bytesTransferred: (json['bytesTransferred'] as num?)?.toInt() ?? 0,
+      totalBytes: (json['totalBytes'] as num?)?.toInt() ?? 0,
+      chunksVerified: (json['chunksVerified'] as num?)?.toInt() ?? 0,
+      totalChunks: (json['totalChunks'] as num?)?.toInt() ?? 0,
+      speedBytesPerSec: (json['speedBytesPerSec'] as num?)?.toDouble() ?? 0,
+      etaSeconds: 0,
+      connectionType: json['connectionType'] as String? ?? 'LAN',
+      error: json['error'] as String?,
+      outputPaths: (json['outputPaths'] as List<dynamic>?)
+              ?.whereType<String>()
+              .toList(growable: false) ??
+          const [],
+    );
+  }
 
   TransferItem copyWith({
     String? label,
@@ -122,6 +173,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   static const _prefRelayHost = 'veloce.relayHost';
   static const _prefExportDownloads = 'veloce.exportDownloads';
   static const _prefThemeDark = 'veloce.themeDark';
+  static const _prefHistory = 'veloce.transferHistory';
 
   VeloceSettings _settings = VeloceSettings(
     deviceName: Platform.isIOS ? 'Veloce iPhone' : 'Veloce Mobile',
@@ -132,6 +184,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
 
   AppNodeInfo? _nodeInfo;
   String? _initError;
+  String? _actionError;
   bool _busy = false;
   final Map<String, AppPeer> _peers = {};
   final Map<String, TransferItem> _transfers = {};
@@ -143,6 +196,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   VeloceSettings get settings => _settings;
   AppNodeInfo? get nodeInfo => _nodeInfo;
   String? get initError => _initError;
+  String? get actionError => _actionError;
   bool get busy => _busy;
   bool get isReady => _nodeInfo != null && _initError == null;
   List<AppPeer> get peers => _peers.values.toList(growable: false);
@@ -150,16 +204,47 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
       _transfers.values.toList(growable: false).reversed.toList(growable: false);
   int get activeTransferCount =>
       _transfers.values.where((t) => t.status == TransferStatus.active).length;
+  bool get hasCompletedTransfers =>
+      _transfers.values.any((t) => t.isTerminal);
   AppStartSessionResult? get activeSession => _activeSession;
   AppEventIncomingOffer? get pendingOffer => _pendingOffer;
 
+  void clearActionError() {
+    if (_actionError != null) {
+      _actionError = null;
+      notifyListeners();
+    }
+  }
+
+  void reportError(Object err) {
+    _actionError = _humanizeError(err);
+    notifyListeners();
+  }
+
+  String _humanizeError(Object raw) {
+    final msg = raw
+        .toString()
+        .replaceFirst(RegExp(r'^AnyhowException\((.*)\)$', dotAll: true), r'$1')
+        .replaceFirst(RegExp(r'^Exception:\s*'), '')
+        .trim();
+    if (msg.contains('could not reach peer directly or via any configured relay')) {
+      return 'Could not reach sender over Wi-Fi or Direct P2P. Ensure both devices '
+          'are on the same Wi-Fi/Hotspot, or add a Veloce Relay server (host:port) '
+          'in Settings when sending across cellular / strict NAT networks.';
+    }
+    if (msg.contains('not initialized')) {
+      return 'Transfer engine is still starting. Tap Retry in the top banner.';
+    }
+    return msg;
+  }
+
   Future<void> initialize() async {
     WidgetsBinding.instance.addObserver(this);
-    await _loadSettings();
+    await _loadSettingsAndHistory();
     await _startEngine();
   }
 
-  Future<void> _loadSettings() async {
+  Future<void> _loadSettingsAndHistory() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final defaultName = Platform.isIOS ? 'Veloce iPhone' : 'Veloce Android';
@@ -171,8 +256,40 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
             ? ThemeMode.dark
             : ThemeMode.light,
       );
+
+      final rawHistory = prefs.getString(_prefHistory);
+      if (rawHistory != null && rawHistory.isNotEmpty) {
+        final decoded = jsonDecode(rawHistory);
+        if (decoded is List) {
+          for (final entry in decoded) {
+            if (entry is Map<String, dynamic>) {
+              final item = TransferItem.fromJson(entry);
+              if (item.transferId.isNotEmpty) {
+                _transfers[item.transferId] = item;
+              }
+            }
+          }
+        }
+      }
     } catch (_) {
       // Keep default settings in tests or restricted environments.
+    }
+  }
+
+  Future<void> _persistHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = _transfers.values
+          .where((t) => t.isTerminal)
+          .toList(growable: false);
+      final trimmed =
+          saved.length > 100 ? saved.sublist(saved.length - 100) : saved;
+      await prefs.setString(
+        _prefHistory,
+        jsonEncode(trimmed.map((t) => t.toJson()).toList(growable: false)),
+      );
+    } catch (_) {
+      // Ignore persistence errors in headless tests.
     }
   }
 
@@ -221,6 +338,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
         overrideLanAddrs: wifiAddrs,
       );
 
+      _peers.clear();
       for (final peer in _bridge.listLocalPeers()) {
         _peers[peer.nodeId] = peer;
       }
@@ -228,7 +346,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
       await _eventSub?.cancel();
       _eventSub = _bridge.subscribeEvents().listen(handleEngineEvent);
     } catch (err) {
-      _initError = err.toString();
+      _initError = _humanizeError(err);
     }
     notifyListeners();
   }
@@ -251,6 +369,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     }
 
     if (needsRestart) {
+      _activeSession = null;
       await _startEngine();
     }
   }
@@ -261,9 +380,10 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     unawaited(updateSettings(_settings.copyWith(themeMode: nextMode)));
   }
 
-  Future<void> startSession(List<String> paths, {String? targetPeerNodeId}) async {
-    if (paths.isEmpty) return;
+  Future<bool> startSession(List<String> paths, {String? targetPeerNodeId}) async {
+    if (paths.isEmpty) return false;
     _busy = true;
+    _actionError = null;
     notifyListeners();
     try {
       final relays = _settings.relayHost
@@ -276,7 +396,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
         targetPeerNodeId: targetPeerNodeId,
         relayHints: relays,
       );
-      _activeSession = res;
+      _activeSession = targetPeerNodeId == null ? res : _activeSession;
       if (targetPeerNodeId != null) {
         final label = res.fileCount == 1 && res.files.isNotEmpty
             ? res.files.first.relativePath
@@ -296,18 +416,33 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
         );
         await _syncActiveTransferGuards();
       }
+      return true;
+    } catch (err) {
+      _actionError = _humanizeError(err);
+      return false;
     } finally {
       _busy = false;
       notifyListeners();
     }
   }
 
+  void stopHostingSession() {
+    final session = _activeSession;
+    if (session == null) return;
+    _activeSession = null;
+    try {
+      _bridge.cancelTransfer(transferId: session.transferId);
+    } catch (_) {}
+    notifyListeners();
+  }
+
   AppTicketPreview parseTicket(String code) {
     return _bridge.parseTicket(ticketCode: code);
   }
 
-  Future<void> joinSession(String ticketCode) async {
+  Future<bool> joinSession(String ticketCode) async {
     _busy = true;
+    _actionError = null;
     notifyListeners();
     try {
       final res = await _bridge.joinSession(
@@ -329,6 +464,10 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
         connectionType: 'Direct-P2P',
       );
       await _syncActiveTransferGuards();
+      return true;
+    } catch (err) {
+      _actionError = _humanizeError(err);
+      return false;
     } finally {
       _busy = false;
       notifyListeners();
@@ -352,11 +491,15 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
       etaSeconds: 0,
       connectionType: offer.connectionType,
     );
-    _bridge.acceptIncomingTransfer(
-      transferId: offer.transferId,
-      outputDir: _nodeInfo?.defaultDownloadDir,
-    );
-    await _syncActiveTransferGuards();
+    try {
+      _bridge.acceptIncomingTransfer(
+        transferId: offer.transferId,
+        outputDir: _nodeInfo?.defaultDownloadDir,
+      );
+      await _syncActiveTransferGuards();
+    } catch (err) {
+      _actionError = _humanizeError(err);
+    }
     notifyListeners();
   }
 
@@ -364,24 +507,52 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     final offer = _pendingOffer;
     if (offer == null) return;
     _pendingOffer = null;
-    _bridge.rejectIncomingTransfer(
-      transferId: offer.transferId,
-      reason: 'Declined on mobile device',
-    );
+    try {
+      _bridge.rejectIncomingTransfer(
+        transferId: offer.transferId,
+        reason: 'Declined on mobile device',
+      );
+    } catch (_) {}
     notifyListeners();
   }
 
   void pauseTransfer(String transferId) {
-    _bridge.pauseTransfer(transferId: transferId);
+    try {
+      _bridge.pauseTransfer(transferId: transferId);
+    } catch (err) {
+      _actionError = _humanizeError(err);
+      notifyListeners();
+    }
   }
 
   Future<void> resumeTransfer(String transferId) async {
-    await _bridge.resumeTransfer(transferId: transferId);
-    await _syncActiveTransferGuards();
+    _actionError = null;
+    try {
+      final resumed = await _bridge.resumeTransfer(transferId: transferId);
+      if (resumed) {
+        final existing = _transfers[transferId];
+        if (existing != null) {
+          _transfers[transferId] = existing.copyWith(
+            status: TransferStatus.active,
+            clearError: true,
+          );
+        }
+        await _syncActiveTransferGuards();
+        notifyListeners();
+      }
+    } catch (err) {
+      _actionError = _humanizeError(err);
+      notifyListeners();
+    }
   }
 
   void cancelTransfer(String transferId) {
-    _bridge.cancelTransfer(transferId: transferId);
+    try {
+      _bridge.cancelTransfer(transferId: transferId);
+    } catch (_) {}
+    if (_activeSession?.transferId == transferId) {
+      _activeSession = null;
+    }
     final existing = _transfers[transferId];
     if (existing != null) {
       _transfers[transferId] = existing.copyWith(
@@ -389,9 +560,34 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
         speedBytesPerSec: 0,
         etaSeconds: 0,
       );
+      unawaited(_persistHistory());
       unawaited(_syncActiveTransferGuards());
       notifyListeners();
     }
+  }
+
+  /// Removes a single transfer entry from history (cancelling first if still active/paused).
+  void removeTransfer(String transferId) {
+    final existing = _transfers.remove(transferId);
+    if (existing == null) return;
+    if (!existing.isTerminal) {
+      try {
+        _bridge.cancelTransfer(transferId: transferId);
+      } catch (_) {}
+    }
+    if (_activeSession?.transferId == transferId) {
+      _activeSession = null;
+    }
+    unawaited(_persistHistory());
+    unawaited(_syncActiveTransferGuards());
+    notifyListeners();
+  }
+
+  /// Clears all completed, failed, and cancelled transfers from history while keeping active ones.
+  void clearCompletedTransfers() {
+    _transfers.removeWhere((_, item) => item.isTerminal);
+    unawaited(_persistHistory());
+    notifyListeners();
   }
 
   /// Auto-pauses active transfers when the OS suspends the app (crucial on iOS to flush
@@ -401,7 +597,9 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     if (state == AppLifecycleState.paused) {
       for (final item in _transfers.values) {
         if (item.status == TransferStatus.active && item.direction == 'receive') {
-          _bridge.pauseTransfer(transferId: item.transferId);
+          try {
+            _bridge.pauseTransfer(transferId: item.transferId);
+          } catch (_) {}
         }
       }
     }
@@ -477,7 +675,10 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
         final existing = _transfers[transferId];
         _transfers[transferId] = TransferItem(
           transferId: transferId,
-          label: existing?.label ?? 'Transfer #$transferId',
+          label: existing?.label ??
+              (direction == 'send'
+                  ? 'Sent #$transferId'
+                  : 'Received #$transferId'),
           direction: direction,
           status: TransferStatus.completed,
           bytesTransferred: totalBytes,
@@ -489,6 +690,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           connectionType: existing?.connectionType ?? 'LAN',
           outputPaths: outputPaths,
         );
+        unawaited(_persistHistory());
         if (direction == 'receive' &&
             _settings.exportToDownloads &&
             outputPaths.isNotEmpty) {
@@ -497,6 +699,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
       case AppEventTransferFailed(:final transferId, :final direction, :final error):
         final existing = _transfers[transferId];
         final isCancel = error.toLowerCase().contains('cancel');
+        final humanized = _humanizeError(error);
         _transfers[transferId] = (existing ??
                 TransferItem(
                   transferId: transferId,
@@ -515,8 +718,12 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           status: isCancel ? TransferStatus.cancelled : TransferStatus.failed,
           speedBytesPerSec: 0,
           etaSeconds: 0,
-          error: error,
+          error: humanized,
         );
+        if (!isCancel) {
+          _actionError = humanized;
+        }
+        unawaited(_persistHistory());
     }
 
     unawaited(_syncActiveTransferGuards());
@@ -531,6 +738,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     final current = _transfers[transferId];
     if (current != null && exported.isNotEmpty) {
       _transfers[transferId] = current.copyWith(outputPaths: exported);
+      await _persistHistory();
       notifyListeners();
     }
   }

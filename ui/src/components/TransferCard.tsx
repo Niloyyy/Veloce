@@ -4,7 +4,9 @@ import {
   CheckCircle2,
   Pause,
   Play,
+  RotateCcw,
   ShieldCheck,
+  Trash2,
   X,
   XCircle,
 } from "lucide-react";
@@ -17,6 +19,7 @@ interface TransferCardProps {
   onPause: (transferId: string) => void;
   onResume: (transferId: string) => void;
   onCancel: (transferId: string) => void;
+  onRemove: (transferId: string) => void;
 }
 
 function SpeedSparkline({ samples }: { samples: number[] }) {
@@ -39,7 +42,13 @@ function SpeedSparkline({ samples }: { samples: number[] }) {
   );
 }
 
-export function TransferCard({ transfer, onPause, onResume, onCancel }: TransferCardProps) {
+export function TransferCard({
+  transfer,
+  onPause,
+  onResume,
+  onCancel,
+  onRemove,
+}: TransferCardProps) {
   const pct =
     transfer.totalBytes > 0
       ? Math.min(100, (transfer.bytesTransferred / transfer.totalBytes) * 100)
@@ -63,6 +72,7 @@ export function TransferCard({ transfer, onPause, onResume, onCancel }: Transfer
             <span className="muted-xs">
               {formatBytes(transfer.bytesTransferred)} / {formatBytes(transfer.totalBytes)}
               {transfer.status === "paused" ? " • Paused (resume state saved)" : ""}
+              {transfer.status === "cancelled" ? " • Cancelled" : ""}
             </span>
           </div>
         </div>
@@ -110,14 +120,44 @@ export function TransferCard({ transfer, onPause, onResume, onCancel }: Transfer
             </>
           )}
           {transfer.status === "completed" && (
-            <span className="status-icon ok" title="Completed and Merkle verified">
-              <CheckCircle2 size={17} />
-            </span>
+            <>
+              <span className="status-icon ok" title="Completed and Merkle verified">
+                <CheckCircle2 size={17} />
+              </span>
+              <button
+                className="icon-btn"
+                title="Remove from history"
+                type="button"
+                onClick={() => onRemove(transfer.transferId)}
+              >
+                <Trash2 size={14} />
+              </button>
+            </>
           )}
           {(transfer.status === "failed" || transfer.status === "cancelled") && (
-            <span className="status-icon err" title={transfer.error ?? "Cancelled"}>
-              <XCircle size={17} />
-            </span>
+            <>
+              <span className="status-icon err" title={transfer.error ?? "Cancelled"}>
+                <XCircle size={17} />
+              </span>
+              {transfer.status === "failed" && transfer.direction === "receive" && (
+                <button
+                  className="icon-btn icon-btn-resume"
+                  title="Retry transfer"
+                  type="button"
+                  onClick={() => onResume(transfer.transferId)}
+                >
+                  <RotateCcw size={14} />
+                </button>
+              )}
+              <button
+                className="icon-btn"
+                title="Remove from history"
+                type="button"
+                onClick={() => onRemove(transfer.transferId)}
+              >
+                <Trash2 size={14} />
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -133,14 +173,18 @@ export function TransferCard({ transfer, onPause, onResume, onCancel }: Transfer
         <div className="telemetry-metrics">
           <span>
             <strong>
-              {transfer.status === "paused" ? "Paused" : formatSpeed(transfer.speedBytesPerSec)}
+              {transfer.status === "paused"
+                ? "Paused"
+                : transfer.status === "cancelled"
+                  ? "Cancelled"
+                  : formatSpeed(transfer.speedBytesPerSec)}
             </strong>
           </span>
           <span>
             ETA:{" "}
             {transfer.status === "completed"
               ? "Done"
-              : transfer.status === "paused"
+              : transfer.status === "paused" || transfer.status === "cancelled"
                 ? "—"
                 : formatEta(transfer.etaSeconds)}
           </span>

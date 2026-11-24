@@ -1,4 +1,4 @@
-import { Check, Copy, QrCode, ShieldCheck } from "lucide-react";
+import { Check, Copy, QrCode, ShieldCheck, Square } from "lucide-react";
 import QRCode from "qrcode";
 import { useEffect, useState } from "react";
 import type { StartSessionResult } from "../types/veloce";
@@ -6,9 +6,11 @@ import { formatBytes } from "../utils/format";
 
 interface QrCodeCardProps {
   session: StartSessionResult;
+  hasRelay: boolean;
+  onStopSharing: () => void;
 }
 
-export function QrCodeCard({ session }: QrCodeCardProps) {
+export function QrCodeCard({ session, hasRelay, onStopSharing }: QrCodeCardProps) {
   const [qrDataUrl, setQrDataUrl] = useState<string>("");
   const [copied, setCopied] = useState(false);
 
@@ -50,10 +52,21 @@ export function QrCodeCard({ session }: QrCodeCardProps) {
           <QrCode size={16} />
           <h3>Global Session Ticket</h3>
         </div>
-        <span className="merkle-pill">
-          <ShieldCheck size={13} />
-          BLAKE3 Verified ({session.totalChunks} chunks)
-        </span>
+        <div className="ticket-header-actions">
+          <span className="merkle-pill">
+            <ShieldCheck size={13} />
+            BLAKE3 ({session.totalChunks} chunks)
+          </span>
+          <button
+            className="btn-secondary btn-sm"
+            type="button"
+            title="Stop hosting this ticket"
+            onClick={onStopSharing}
+          >
+            <Square size={12} />
+            <span>Stop</span>
+          </button>
+        </div>
       </div>
 
       <div className="ticket-body">
@@ -67,8 +80,8 @@ export function QrCodeCard({ session }: QrCodeCardProps) {
 
         <div className="ticket-meta">
           <p className="muted-sm">
-            Share this ephemeral code or scan the QR code from anywhere in the world. Veloce tries
-            LAN first, punches UDP NATs directly, or falls back to an end-to-end encrypted relay.
+            Share this ephemeral code or scan the QR code on Veloce Mobile. Veloce connects over
+            LAN, STUN Direct P2P, or your configured end-to-end encrypted relay.
           </p>
           <div className="ticket-stats">
             <span>{session.fileCount} file(s)</span>
@@ -84,6 +97,12 @@ export function QrCodeCard({ session }: QrCodeCardProps) {
               <span>{copied ? "Copied" : "Copy"}</span>
             </button>
           </div>
+          {!hasRelay && (
+            <span className="field-hint">
+              Tip: Sending across cellular CGNAT or symmetric NAT? Add a{" "}
+              <code>veloce-relay</code> host:port in Settings.
+            </span>
+          )}
         </div>
       </div>
     </div>

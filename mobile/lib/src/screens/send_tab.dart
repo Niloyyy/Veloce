@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,9 +11,14 @@ import '../state/veloce_controller.dart';
 import '../utils/formatters.dart';
 
 class SendTab extends StatefulWidget {
-  const SendTab({super.key, required this.controller});
+  const SendTab({
+    super.key,
+    required this.controller,
+    this.onSwitchToTransfers,
+  });
 
   final VeloceController controller;
+  final VoidCallback? onSwitchToTransfers;
 
   @override
   State<SendTab> createState() => _SendTabState();
@@ -20,16 +27,51 @@ class SendTab extends StatefulWidget {
 class _SendTabState extends State<SendTab> {
   List<String> _selectedPaths = const [];
 
+  Future<List<String>> _pickPaths({FileType type = FileType.any}) async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        type: type,
+        withData: false,
+      );
+      if (result == null) return const [];
+      final resolved = <String>[];
+      for (final file in result.files) {
+        final path = file.path;
+        if (path != null && path.isNotEmpty) {
+          resolved.add(path);
+        } else if (file.bytes != null) {
+          final tmp = File(
+            '${Directory.systemTemp.path}/${file.name.isNotEmpty ? file.name : 'shared_item.bin'}',
+          );
+          await tmp.writeAsBytes(file.bytes!, flush: true);
+          resolved.add(tmp.path);
+        }
+      }
+      if (resolved.isEmpty && result.files.isNotEmpty) {
+        widget.controller.reportError(
+          'Selected file could not be read locally (cloud-only file). '
+          'Please download it to your device first.',
+        );
+      }
+      return resolved;
+    } catch (err) {
+      widget.controller.reportError(err);
+      return const [];
+    }
+  }
+
   Future<void> _pickAndHost({FileType type = FileType.any, String? targetPeer}) async {
-    final result = await FilePicker.platform.pickFiles(
-      allowMultiple: true,
-      type: type,
-    );
-    if (result == null) return;
-    final paths = result.paths.whereType<String>().toList();
+    final paths = await _pickPaths(type: type);
     if (paths.isEmpty) return;
     setState(() => _selectedPaths = paths);
-    await widget.controller.startSession(paths, targetPeerNodeId: targetPeer);
+    final ok = await widget.controller.startSession(
+      paths,
+      targetPeerNodeId: targetPeer,
+    );
+    if (ok && targetPeer != null) {
+      widget.onSwitchToTransfers?.call();
+    }
   }
 
   Future<void> _sendToLanPeer(AppPeer peer) async {
@@ -37,13 +79,20 @@ class _SendTabState extends State<SendTab> {
       await _pickAndHost(targetPeer: peer.nodeId);
       return;
     }
-    await widget.controller.startSession(_selectedPaths, targetPeerNodeId: peer.nodeId);
+    final ok = await widget.controller.startSession(
+      _selectedPaths,
+      targetPeerNodeId: peer.nodeId,
+    );
+    if (ok) {
+      widget.onSwitchToTransfers?.call();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final ctrl = widget.controller;
     final session = ctrl.activeSession;
+    final hasRelay = ctrl.settings.relayHost.trim().isNotEmpty;
 
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -76,7 +125,7 @@ class _SendTabState extends State<SendTab> {
                       child: FilledButton.icon(
                         onPressed: ctrl.busy ? null : () => _pickAndHost(),
                         icon: const Icon(Icons.insert_drive_file_outlined, size: 18),
-                        label: Text(ctrl.busy ? 'Hashing...' : 'Pick Files'),
+                        label: Text(ctrl.busy ? 'Preparing...' : 'Pick Files'),
                       ),
                     ),
                     const SizedBox(width: 10),
@@ -104,19 +153,30 @@ class _SendTabState extends State<SendTab> {
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        'Global Session Ticket',
-                        style: Theme.of(context).textTheme.titleSmall,
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Global Session Ticket',
+                              style: Theme.of(context).textTheme.titleSmall,
+                            ),
+                            Text(
+                              '${session.fileCount} item(s) • ${formatBytes(session.totalSize)}',
+                              style: Theme.of(context).textTheme.labelSmall,
+                            ),
+                          ],
+                        ),
                       ),
-                      Text(
-                        '${session.fileCount} item(s) • ${formatBytes(session.totalSize)}',
-                        style: Theme.of(context).textTheme.labelSmall,
+                      TextButton.icon(
+                        onPressed: ctrl.stopHostingSession,
+                        icon: const Icon(Icons.stop_circle_outlined, size: 16),
+                        label: const Text('Stop'),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 14),
+                  const SizedBox(height: 10),
                   Container(
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
@@ -173,6 +233,16 @@ class _SendTabState extends State<SendTab> {
                       ),
                     ],
                   ),
+                  if (!hasRelay) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      'Keep Veloce open while the receiver downloads. Works over Wi-Fi, '
+                      'Hotspot, and STUN Direct P2P — for cellular CGNAT / symmetric NAT, '
+                      'configure a Relay Server (host:port) in Settings.',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -194,7 +264,7 @@ class _SendTabState extends State<SendTab> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      'Scanning _veloce._udp.local. on Wi-Fi for nearby devices...',
+                      'Scanning _veloce._udp.local. on Wi-Fi / Hotspot for nearby devices...',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ),

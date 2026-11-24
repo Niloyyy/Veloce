@@ -180,6 +180,12 @@ impl MagicUdpSocket {
         self.path_events_tx.subscribe()
     }
 
+    /// Sends a raw RFC 5389 STUN Binding Request datagram on the shared UDP socket.
+    pub async fn send_raw_datagram(&self, dest: SocketAddr, bytes: &[u8]) -> io::Result<()> {
+        self.io.send_to(bytes, dest).await?;
+        Ok(())
+    }
+
     /// Sends a Veloce signaling / STUN / hole-punch UDP datagram on the shared socket.
     pub async fn send_signaling(
         &self,
@@ -383,6 +389,80 @@ fn bind_tuned_udp_socket(
     Ok((sock.into(), actual_recv, actual_send))
 }
 
+const RFC5389_MAGIC_COOKIE: u32 = 0x2112_A442;
+
+/// Checks whether a UDP datagram is an RFC 5389 STUN Binding Response (`0x0101`).
+/// First byte `0x01` has RFC 9000 bit 6 (`0x40`) == 0, so it never collides with QUIC packets.
+fn is_rfc5389_stun_response(buf: &[u8]) -> bool {
+    if buf.len() < 20 {
+        return false;
+    }
+    let msg_type = u16::from_be_bytes([buf[0], buf[1]]);
+    let cookie = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    msg_type == 0x0101 && cookie == RFC5389_MAGIC_COOKIE
+}
+
+/// Parses `XOR-MAPPED-ADDRESS` (`0x0020` or `0x8020`) or `MAPPED-ADDRESS` (`0x0001`)
+/// from an RFC 5389 STUN Binding Response, returning `(tx_id_low64, SocketAddr)`.
+fn parse_rfc5389_stun_response(buf: &[u8]) -> Option<(u64, SocketAddr)> {
+    if !is_rfc5389_stun_response(buf) {
+        return None;
+    }
+    let msg_len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+    let end = (20usize.saturating_add(msg_len)).min(buf.len());
+    let tx_id_bytes: [u8; 8] = buf[12..20].try_into().ok()?;
+    let tx_id = u64::from_be_bytes(tx_id_bytes);
+
+    let mut pos = 20usize;
+    let mut fallback_mapped: Option<SocketAddr> = None;
+
+    while pos + 4 <= end {
+        let attr_type = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
+        let attr_len = u16::from_be_bytes([buf[pos + 2], buf[pos + 3]]) as usize;
+        pos += 4;
+        if pos + attr_len > end {
+            break;
+        }
+        let val = &buf[pos..pos + attr_len];
+        // XOR-MAPPED-ADDRESS (0x0020 orcomprehension-optional 0x8020)
+        if (attr_type == 0x0020 || attr_type == 0x8020) && val.len() >= 8 {
+            let family = val[1];
+            let xport = u16::from_be_bytes([val[2], val[3]]);
+            let port = xport ^ ((RFC5389_MAGIC_COOKIE >> 16) as u16);
+            if family == 0x01 {
+                let cookie_bytes = RFC5389_MAGIC_COOKIE.to_be_bytes();
+                let ip = Ipv4Addr::new(
+                    val[4] ^ cookie_bytes[0],
+                    val[5] ^ cookie_bytes[1],
+                    val[6] ^ cookie_bytes[2],
+                    val[7] ^ cookie_bytes[3],
+                );
+                return Some((tx_id, SocketAddr::new(IpAddr::V4(ip), port)));
+            } else if family == 0x02 && val.len() >= 20 {
+                let mut raw = [0u8; 16];
+                raw.copy_from_slice(&val[4..20]);
+                let cookie_bytes = RFC5389_MAGIC_COOKIE.to_be_bytes();
+                for i in 0..4 {
+                    raw[i] ^= cookie_bytes[i];
+                }
+                for i in 0..12 {
+                    raw[4 + i] ^= buf[8 + i];
+                }
+                return Some((tx_id, SocketAddr::new(IpAddr::V6(raw.into()), port)));
+            }
+        } else if attr_type == 0x0001 && val.len() >= 8 && val[1] == 0x01 {
+            let port = u16::from_be_bytes([val[2], val[3]]);
+            let ip = Ipv4Addr::new(val[4], val[5], val[6], val[7]);
+            fallback_mapped = Some(SocketAddr::new(IpAddr::V4(ip), port));
+        }
+        // Attributes are padded to 4-byte boundaries.
+        let padded = (attr_len + 3) & !3;
+        pos = pos.saturating_add(padded);
+    }
+
+    fallback_mapped.map(|addr| (tx_id, addr))
+}
+
 impl AsyncUdpSocket for MagicUdpSocket {
     fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
         Box::pin(MagicUdpPoller {
@@ -497,6 +577,23 @@ impl AsyncUdpSocket for MagicUdpSocket {
             for read_idx in 0..count {
                 let m = meta[read_idx];
                 if m.len == 0 {
+                    continue;
+                }
+
+                let is_rfc5389 = m.len == m.stride
+                    && is_rfc5389_stun_response(&bufs[read_idx][..m.len]);
+                if is_rfc5389 {
+                    if let Some((tx_id, observed_addr)) =
+                        parse_rfc5389_stun_response(&bufs[read_idx][..m.len])
+                    {
+                        let _ = self.signaling_tx.send((
+                            m.addr,
+                            SignalingMessage::StunResponse {
+                                tx_id,
+                                observed_addr,
+                            },
+                        ));
+                    }
                     continue;
                 }
 

@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use core_protocol::{ConnectionType, NodeId, SessionTicket, TransferProfile};
 use core_storage::ChunkSource;
 use core_transport::{
-    DiscoveryEvent, EndpointOptions, IncomingOfferDecision, LocalPeer, TransferDirection,
-    VeloceEndpoint,
+    DiscoveryEvent, EndpointOptions, EndpointSessionOutcome, IncomingOfferDecision, LocalPeer,
+    TransferDirection, VeloceEndpoint,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -354,6 +354,44 @@ impl VeloceEngine {
             }
         });
 
+        // Forward session completion/failure outcomes for hosted global sends & incoming LAN receives.
+        let tx_outcomes = events_tx.clone();
+        let cancel_outcomes = cancel.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel_outcomes.cancelled() => break,
+                    item = channels.outcomes_rx.recv() => {
+                        let Some(outcome) = item else { break };
+                        match outcome {
+                            EndpointSessionOutcome::Completed { transfer_id, direction, summary } => {
+                                let _ = tx_outcomes.send(EngineEvent::TransferCompleted {
+                                    transfer_id,
+                                    direction: direction_str(direction).into(),
+                                    total_bytes: summary.total_bytes,
+                                    total_chunks: summary.total_chunks,
+                                    elapsed_ms: summary.elapsed_ms,
+                                    average_speed_bytes_per_sec: summary.average_speed_bytes_per_sec,
+                                    output_paths: summary
+                                        .finalized_paths
+                                        .into_iter()
+                                        .map(|p| p.display().to_string())
+                                        .collect(),
+                                });
+                            }
+                            EndpointSessionOutcome::Failed { transfer_id, direction, error } => {
+                                let _ = tx_outcomes.send(EngineEvent::TransferFailed {
+                                    transfer_id,
+                                    direction: direction_str(direction).into(),
+                                    error,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
         // Forward ConnectionTypeChanged events (LAN / Direct-P2P / Relayed).
         let tx_conn = events_tx.clone();
         let cancel_conn = cancel.clone();
@@ -480,11 +518,25 @@ impl VeloceEngine {
             ChunkSource::from_paths_for_profile_async(path_bufs, self.profile, None).await?;
         let manifest = source.manifest();
 
-        let hosted = self.endpoint.host_session(
-            Arc::clone(&source),
-            vec![self.endpoint.listen_addr()],
-            relay_hints,
-        )?;
+        let listen = self.endpoint.listen_addr();
+        let extra_addrs = if listen.ip().is_unspecified() {
+            Vec::new()
+        } else {
+            vec![listen]
+        };
+        // Only run external RFC 5389 STUN when bound on an unspecified (0.0.0.0 / ::) interface
+        // and not targeting a local LAN push, keeping unit tests on 127.0.0.1 instant & deterministic.
+        let allow_public_stun = listen.ip().is_unspecified() && target_peer_node_id.is_none();
+
+        let hosted = self
+            .endpoint
+            .host_session_async(
+                Arc::clone(&source),
+                extra_addrs,
+                relay_hints,
+                allow_public_stun,
+            )
+            .await?;
 
         let result = StartSessionResultDto {
             transfer_id: hosted.transfer_id.clone(),
@@ -666,10 +718,15 @@ impl VeloceEngine {
                         .get(&tid)
                         .is_some_and(|m| m.paused);
                     if !is_paused {
-                        managed
+                        // Mark paused/retryable so the user can one-tap Retry/Resume from saved
+                        // `.veloce-resume-*.state` without re-entering the ticket!
+                        if let Some(entry) = managed
                             .lock()
                             .expect("managed_transfers lock poisoned")
-                            .remove(&tid);
+                            .get_mut(&tid)
+                        {
+                            entry.paused = true;
+                        }
                         let _ = tx.send(EngineEvent::TransferFailed {
                             transfer_id: tid,
                             direction: "receive".into(),

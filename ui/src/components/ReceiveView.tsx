@@ -7,7 +7,7 @@ interface ReceiveViewProps {
   outputDir: string;
   busy: boolean;
   onChangeOutputDir: () => void;
-  onJoinSession: (ticketCode: string) => Promise<void>;
+  onJoinSession: (ticketCode: string) => Promise<boolean>;
 }
 
 export function ReceiveView({
@@ -53,9 +53,11 @@ export function ReceiveView({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!ticketInput.trim() || !preview) return;
-    await onJoinSession(ticketInput.trim());
-    setTicketInput("");
-    setPreview(null);
+    const ok = await onJoinSession(ticketInput.trim());
+    if (ok) {
+      setTicketInput("");
+      setPreview(null);
+    }
   };
 
   return (

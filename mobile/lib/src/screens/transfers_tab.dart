@@ -41,18 +41,66 @@ class TransfersTab extends StatelessWidget {
       );
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: items.length,
-      itemBuilder: (context, idx) {
-        final item = items[idx];
-        return TransferCard(
-          item: item,
-          onPause: () => controller.pauseTransfer(item.transferId),
-          onResume: () => controller.resumeTransfer(item.transferId),
-          onCancel: () => controller.cancelTransfer(item.transferId),
-        );
-      },
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '${items.length} transfer(s)',
+                style: Theme.of(context).textTheme.labelMedium,
+              ),
+              if (controller.hasCompletedTransfers)
+                TextButton.icon(
+                  onPressed: controller.clearCompletedTransfers,
+                  icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+                  label: const Text('Clear History'),
+                ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            itemCount: items.length,
+            itemBuilder: (context, idx) {
+              final item = items[idx];
+              final card = TransferCard(
+                item: item,
+                onPause: () => controller.pauseTransfer(item.transferId),
+                onResume: () => controller.resumeTransfer(item.transferId),
+                onCancel: () => controller.cancelTransfer(item.transferId),
+                onRemove: () => controller.removeTransfer(item.transferId),
+                onRetry: () => controller.resumeTransfer(item.transferId),
+              );
+              if (!item.isTerminal) {
+                return card;
+              }
+              return Dismissible(
+                key: ValueKey('transfer-${item.transferId}'),
+                direction: DismissDirection.horizontal,
+                onDismissed: (_) => controller.removeTransfer(item.transferId),
+                background: Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  alignment: Alignment.centerRight,
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.errorContainer,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    Icons.delete_outline_rounded,
+                    color: Theme.of(context).colorScheme.onErrorContainer,
+                  ),
+                ),
+                child: card,
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 }

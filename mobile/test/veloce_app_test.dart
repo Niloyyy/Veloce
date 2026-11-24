@@ -182,6 +182,7 @@ void main() {
             onPause: () => paused = true,
             onResume: () => resumed = true,
             onCancel: () {},
+            onRemove: () {},
           ),
         ),
       ),
@@ -198,6 +199,7 @@ void main() {
             onPause: () {},
             onResume: () => resumed = true,
             onCancel: () {},
+            onRemove: () {},
           ),
         ),
       ),
@@ -269,6 +271,23 @@ void main() {
       ctrl.transfers.single.outputPaths,
       ['Download/Veloce/clip.mp4'],
     );
+
+    // Verify single-item history deletion and bulk clear history.
+    expect(ctrl.hasCompletedTransfers, isTrue);
+    ctrl.removeTransfer('rx1');
+    expect(ctrl.transfers, isEmpty);
+
+    ctrl.handleEngineEvent(
+      const AppEventTransferFailed(
+        transferId: 'rx2',
+        direction: 'receive',
+        error: 'could not reach peer directly or via any configured relay',
+      ),
+    );
+    expect(ctrl.transfers, hasLength(1));
+    expect(ctrl.actionError, contains('Relay server'));
+    ctrl.clearCompletedTransfers();
+    expect(ctrl.transfers, isEmpty);
     ctrl.dispose();
   });
 }

@@ -2,6 +2,19 @@
 
 All notable changes to Veloce are documented in this file.
 
+## [0.1.1] - 2026-11-24
+
+### Fixed
+- **Global Session Tickets & NAT Traversal (`core-transport`, `core-ffi`):**
+  - Stripped unspecified (`0.0.0.0` / `::`) bind addresses from generated `veloce1...` tickets so receivers never dial `0.0.0.0` or loop back to themselves (`PeerMismatch`).
+  - Added built-in RFC 5389 STUN Binding discovery (`stun.cloudflare.com:3478`, `stun.l.google.com:19302`) multiplexed directly on `MagicUdpSocket` so global tickets discover public `IP:port` endpoints out of the box without requiring a custom relay for Cone NATs.
+  - Added `host_session_async` to refresh relay registrations and STUN mappings dynamically when hosting a new session across Wi-Fi / cellular switches.
+  - Wired `EndpointSessionOutcome` from `VeloceEndpoint::handle_incoming_connection` to `VeloceEngine` so hosted global sends and accepted incoming LAN offers reliably emit `TransferCompleted` / `TransferFailed` (releasing Android's Foreground Service / WakeLock and triggering `MediaStore.Downloads` public export on LAN receives).
+- **Transfer History Management & Error UX (`/mobile`, `/ui`):**
+  - Added per-transfer Delete controls, swipe-to-delete on Mobile, and "Clear History" actions on both Mobile and Desktop, plus persistent transfer history across app restarts.
+  - Fixed Desktop cancel handling so cancelled transfers immediately transition to `"cancelled"` state, and added one-tap **Retry** on failed receives using saved `.veloce-resume-*.state` bitfields.
+  - Added active ticket revocation (**Stop** button), dismissible error banners for FFI / NAT errors on Mobile & Desktop, ticket preservation on failed joins, Paste/Clear + QR Torch/Camera controls, cloud-backed file picker fallbacks, and Android multi-network + Mobile Hotspot (`ap*`, `wlan*`, `rndis*`) LAN IP discovery.
+
 ## [0.1.0] - 2026-11-24
 
 ### Added

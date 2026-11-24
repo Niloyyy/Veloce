@@ -215,33 +215,71 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * Queries active Wi-Fi/Ethernet link IP addresses via Android ConnectivityManager so
-     * Android 11+ (API 30+) devices reliably advertise physical LAN IPs even when
-     * SELinux restricts RTM_GETLINK netlink enumeration.
+     * Queries active Wi-Fi, Ethernet, and Hotspot LAN IP addresses via ConnectivityManager
+     * (`allNetworks` so simultaneous cellular or VPN connections do not hide Wi-Fi) plus
+     * `NetworkInterface` fallback for Android Wi-Fi Hotspot interfaces (`ap0`, `wlan*`, `rndis*`).
      */
     private fun queryActiveWifiAddresses(): List<String> {
-        val cm = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE)
-            as? ConnectivityManager ?: return emptyList()
         val results = mutableListOf<String>()
-        val activeNetwork = cm.activeNetwork ?: return emptyList()
-        val caps = cm.getNetworkCapabilities(activeNetwork) ?: return emptyList()
-        val isLanTransport = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-        if (!isLanTransport) return emptyList()
+        val cm = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as? ConnectivityManager
 
-        val linkProps = cm.getLinkProperties(activeNetwork) ?: return emptyList()
-        for (linkAddr in linkProps.linkAddresses) {
-            val addr = linkAddr.address ?: continue
-            if (addr.isLoopbackAddress || addr.isLinkLocalAddress || addr.isMulticastAddress) {
-                continue
-            }
-            val host = addr.hostAddress?.substringBefore('%') ?: continue
-            if (addr is Inet4Address) {
-                results.add(0, host)
-            } else if (addr is Inet6Address) {
-                results.add(host)
+        if (cm != null) {
+            for (network in cm.allNetworks) {
+                val caps = cm.getNetworkCapabilities(network) ?: continue
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+                val isLanTransport = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+                if (!isLanTransport) continue
+
+                val linkProps = cm.getLinkProperties(network) ?: continue
+                for (linkAddr in linkProps.linkAddresses) {
+                    val addr = linkAddr.address ?: continue
+                    if (addr.isLoopbackAddress || addr.isLinkLocalAddress || addr.isMulticastAddress) {
+                        continue
+                    }
+                    val host = addr.hostAddress?.substringBefore('%') ?: continue
+                    if (addr is Inet4Address) {
+                        results.add(0, host)
+                    } else if (addr is Inet6Address) {
+                        results.add(host)
+                    }
+                }
             }
         }
+
+        // Fallback for Android Wi-Fi Hotspot / tethering interfaces (ap0, swlan0, wlan1, rndis0)
+        // which may not appear as a client network in ConnectivityManager.allNetworks.
+        try {
+            val ifaces = java.net.NetworkInterface.getNetworkInterfaces()
+            while (ifaces != null && ifaces.hasMoreElements()) {
+                val iface = ifaces.nextElement()
+                if (!iface.isUp || iface.isLoopback) continue
+                val name = iface.name.lowercase()
+                val isHotspotOrLan = name.startsWith("wlan") ||
+                    name.startsWith("ap") ||
+                    name.startsWith("swlan") ||
+                    name.startsWith("eth") ||
+                    name.startsWith("rndis")
+                if (!isHotspotOrLan) continue
+                val addrs = iface.inetAddresses
+                while (addrs.hasMoreElements()) {
+                    val addr = addrs.nextElement()
+                    if (addr.isLoopbackAddress || addr.isLinkLocalAddress || addr.isMulticastAddress) {
+                        continue
+                    }
+                    val host = addr.hostAddress?.substringBefore('%') ?: continue
+                    if (addr is Inet4Address && addr.isSiteLocalAddress) {
+                        if (!results.contains(host)) {
+                            results.add(host)
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            // Ignore interface enumeration restrictions on locked-down OEM builds.
+        }
+
         return results.distinct()
     }
 

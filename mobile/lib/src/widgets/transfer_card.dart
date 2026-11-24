@@ -11,12 +11,16 @@ class TransferCard extends StatelessWidget {
     required this.onPause,
     required this.onResume,
     required this.onCancel,
+    required this.onRemove,
+    this.onRetry,
   });
 
   final TransferItem item;
   final VoidCallback onPause;
   final VoidCallback onResume;
   final VoidCallback onCancel;
+  final VoidCallback onRemove;
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -75,7 +79,9 @@ class TransferCard extends StatelessWidget {
                 minHeight: 6,
                 color: item.status == TransferStatus.paused
                     ? const Color(0xFFF59E0B)
-                    : null,
+                    : item.status == TransferStatus.failed
+                        ? scheme.error
+                        : null,
               ),
             ),
             const SizedBox(height: 10),
@@ -89,7 +95,9 @@ class TransferCard extends StatelessWidget {
                       Text(
                         item.status == TransferStatus.paused
                             ? 'Paused'
-                            : formatSpeed(item.speedBytesPerSec),
+                            : item.status == TransferStatus.cancelled
+                                ? 'Cancelled'
+                                : formatSpeed(item.speedBytesPerSec),
                         style: Theme.of(context)
                             .textTheme
                             .labelMedium
@@ -146,12 +154,51 @@ class TransferCard extends StatelessWidget {
                     icon: const Icon(Icons.close_rounded, size: 20),
                     onPressed: onCancel,
                   ),
-                ] else if (item.status == TransferStatus.completed)
-                  const Icon(Icons.check_circle_rounded, color: Color(0xFF10B981))
-                else
-                  Icon(Icons.error_outline_rounded, color: scheme.error),
+                ] else ...[
+                  if (item.status == TransferStatus.completed)
+                    const Padding(
+                      padding: EdgeInsets.only(right: 4),
+                      child: Icon(
+                        Icons.check_circle_rounded,
+                        color: Color(0xFF10B981),
+                        size: 20,
+                      ),
+                    )
+                  else
+                    Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: Icon(
+                        Icons.error_outline_rounded,
+                        color: scheme.error,
+                        size: 20,
+                      ),
+                    ),
+                  if (item.status == TransferStatus.failed &&
+                      item.direction == 'receive' &&
+                      onRetry != null)
+                    IconButton(
+                      tooltip: 'Retry transfer',
+                      icon: const Icon(Icons.refresh_rounded, size: 20),
+                      onPressed: onRetry,
+                    ),
+                  IconButton(
+                    tooltip: 'Remove from history',
+                    icon: const Icon(Icons.delete_outline_rounded, size: 20),
+                    onPressed: onRemove,
+                  ),
+                ],
               ],
             ),
+            if (item.outputPaths.isNotEmpty &&
+                item.status == TransferStatus.completed) ...[
+              const SizedBox(height: 6),
+              Text(
+                'Saved: ${item.outputPaths.first}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
             if (item.error != null) ...[
               const SizedBox(height: 6),
               Text(

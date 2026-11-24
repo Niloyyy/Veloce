@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../models/veloce_models.dart';
@@ -8,9 +9,14 @@ import '../state/veloce_controller.dart';
 import '../utils/formatters.dart';
 
 class ReceiveTab extends StatefulWidget {
-  const ReceiveTab({super.key, required this.controller});
+  const ReceiveTab({
+    super.key,
+    required this.controller,
+    this.onJoinedSession,
+  });
 
   final VeloceController controller;
+  final VoidCallback? onJoinedSession;
 
   @override
   State<ReceiveTab> createState() => _ReceiveTabState();
@@ -39,7 +45,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
       });
       return;
     }
-    _debounce = Timer(const Duration(milliseconds: 180), () {
+    _debounce = Timer(const Duration(milliseconds: 150), () {
       try {
         final parsed = widget.controller.parseTicket(trimmed);
         if (mounted) {
@@ -52,11 +58,22 @@ class _ReceiveTabState extends State<ReceiveTab> {
         if (mounted) {
           setState(() {
             _preview = null;
-            _parseError = err.toString();
+            _parseError = err
+                .toString()
+                .replaceFirst(RegExp(r'^AnyhowException\((.*)\)$', dotAll: true), r'$1');
           });
         }
       }
     });
+  }
+
+  Future<void> _pasteFromClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text?.trim();
+    if (text != null && text.isNotEmpty) {
+      _ticketController.text = text;
+      _onTicketChanged(text);
+    }
   }
 
   Future<void> _openQrScanner() async {
@@ -72,16 +89,15 @@ class _ReceiveTabState extends State<ReceiveTab> {
   Future<void> _joinSession() async {
     final code = _ticketController.text.trim();
     if (code.isEmpty || _preview == null) return;
-    await widget.controller.joinSession(code);
+    final ok = await widget.controller.joinSession(code);
+    if (!ok) return;
     _ticketController.clear();
-    setState(() {
-      _preview = null;
-      _parseError = null;
-    });
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Joining session — check Transfers tab')),
-      );
+      setState(() {
+        _preview = null;
+        _parseError = null;
+      });
+      widget.onJoinedSession?.call();
     }
   }
 
@@ -104,10 +120,20 @@ class _ReceiveTabState extends State<ReceiveTab> {
                       'Join Global Session',
                       style: Theme.of(context).textTheme.titleMedium,
                     ),
-                    FilledButton.tonalIcon(
-                      onPressed: _openQrScanner,
-                      icon: const Icon(Icons.qr_code_scanner_rounded, size: 18),
-                      label: const Text('Scan QR'),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: 'Paste ticket from clipboard',
+                          onPressed: _pasteFromClipboard,
+                          icon: const Icon(Icons.content_paste_rounded, size: 19),
+                        ),
+                        FilledButton.tonalIcon(
+                          onPressed: _openQrScanner,
+                          icon: const Icon(Icons.qr_code_scanner_rounded, size: 18),
+                          label: const Text('Scan QR'),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -123,6 +149,16 @@ class _ReceiveTabState extends State<ReceiveTab> {
                     hintText: 'Paste a session ticket or scan a QR code',
                     border: const OutlineInputBorder(),
                     errorText: _parseError,
+                    suffixIcon: _ticketController.text.isNotEmpty
+                        ? IconButton(
+                            tooltip: 'Clear input',
+                            icon: const Icon(Icons.clear_rounded, size: 18),
+                            onPressed: () {
+                              _ticketController.clear();
+                              _onTicketChanged('');
+                            },
+                          )
+                        : null,
                   ),
                 ),
                 if (_preview != null) ...[
@@ -164,7 +200,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                         const SizedBox(height: 6),
                         Text(
                           'Sender: ${_preview!.senderShortId} • '
-                          '${_preview!.directAddrs.length} direct hint(s), '
+                          '${_preview!.directAddrs.length} direct endpoint(s), '
                           '${_preview!.relayHints.length} relay(s)',
                           style: Theme.of(context).textTheme.bodySmall,
                         ),
@@ -203,8 +239,8 @@ class _ReceiveTabState extends State<ReceiveTab> {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        'Nearby devices can send directly over Wi-Fi. Incoming offers '
-                        'prompt for approval before writing any data.',
+                        'Nearby devices on Wi-Fi or Hotspot can send directly. '
+                        'Incoming offers prompt for approval before writing any data.',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
@@ -227,17 +263,39 @@ class _QrScannerPage extends StatefulWidget {
 }
 
 class _QrScannerPageState extends State<_QrScannerPage> {
+  final MobileScannerController _scannerController = MobileScannerController();
   bool _handled = false;
+
+  @override
+  void dispose() {
+    _scannerController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Scan Veloce QR Code')),
+      appBar: AppBar(
+        title: const Text('Scan Veloce QR Code'),
+        actions: [
+          IconButton(
+            tooltip: 'Toggle flashlight',
+            icon: const Icon(Icons.flashlight_on_rounded),
+            onPressed: _scannerController.toggleTorch,
+          ),
+          IconButton(
+            tooltip: 'Switch camera',
+            icon: const Icon(Icons.cameraswitch_rounded),
+            onPressed: _scannerController.switchCamera,
+          ),
+        ],
+      ),
       body: MobileScanner(
+        controller: _scannerController,
         onDetect: (capture) {
           if (_handled) return;
           for (final barcode in capture.barcodes) {
-            final value = barcode.rawValue;
+            final value = barcode.rawValue?.trim();
             if (value != null &&
                 (value.startsWith('veloce1') || value.startsWith('veloce://'))) {
               _handled = true;
