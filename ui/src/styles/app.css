@@ -82,10 +82,9 @@ p {
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  background: linear-gradient(135deg, var(--accent), #6366f1);
-  color: #fff;
   display: grid;
   place-items: center;
+  flex-shrink: 0;
 }
 
 .topbar-right {

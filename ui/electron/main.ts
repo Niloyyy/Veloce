@@ -206,13 +206,28 @@ async function initNativeEngine(): Promise<void> {
   }
 }
 
+function resolveAppIconPath(): string | undefined {
+  const candidates = [
+    path.join(__dirname, "..", "build", "icon.png"),
+    path.join(process.resourcesPath || "", "build", "icon.png"),
+  ];
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 function createWindow(): void {
+  const iconPath = resolveAppIconPath();
   mainWindow = new BrowserWindow({
     width: 1080,
     height: 760,
     minWidth: 820,
     minHeight: 620,
     title: "Veloce — P2P File Transfer",
+    icon: iconPath,
     backgroundColor: currentSettings.theme === "light" ? "#f4f6fa" : "#0c0f14",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),

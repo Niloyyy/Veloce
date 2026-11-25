@@ -2,6 +2,19 @@
 
 All notable changes to Veloce are documented in this file.
 
+## [0.1.2] - 2026-11-26
+
+### Added
+- **Zero-Cost Global P2P Traversal (`core-transport`, `core-ffi`, Android):**
+  - Dual-stack IPv6 + IPv4 single-port `MagicUdpSocket` (`[::]:0` with automatic `0.0.0.0:0` fallback) and dual-stack RFC 5389 STUN discovery, plus Android 4G/5G global IPv6 and mesh VPN (Tailscale / ZeroTier) ticket candidate support.
+  - Pure-Rust, zero-`unsafe` UPnP IGD (SSDP + SOAP with LAN SSRF guard) and NAT-PMP (RFC 6886) automatic router UDP port forwarding with clean lease release on shutdown.
+  - Happy-Eyeballs parallel direct-candidate racing (`JoinSet`) in `join_session` so unreachable private LAN IPs never stall public IPv6/UPnP/STUN dials.
+  - Zero-cost `veloce-relay` deployment kit (`deploy/relay/`: Dockerfile, docker-compose, hardened systemd unit, Oracle Cloud Always Free guide), graceful `SIGTERM` handling, and optional compile-time `VELOCE_DEFAULT_RELAY` support.
+- **Veloce "Swoop V" Brand Identity:**
+  - Minimal two-tone soaring falcon logo wired across master SVGs (`assets/brand/`), Android mipmaps + API 26 adaptive icon + API 33 Material You monochrome icon, iOS opaque `AppIcon.appiconset`, Desktop Electron (`icon.png`, multi-res `icon.ico`, `favicon.svg`, `BrowserWindow` icon), Mobile/Desktop topbars, and `README.md`.
+- **Hardened Persistent Android Release Signing:**
+  - CI workflows and Gradle now fail fast on partial signing secrets and assert `apksigner` certificates are not `CN=Android Debug`, enabling seamless in-place Android APK upgrades from `v0.1.2` onward.
+
 ## [0.1.1] - 2026-11-24
 
 ### Fixed

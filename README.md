@@ -1,6 +1,12 @@
-# Veloce
+<p align="center">
+  <img src="assets/brand/veloce-logo.svg" alt="Veloce" width="96" height="96" />
+</p>
 
-**High-performance cross-platform local & global P2P file transfer built in Rust.**
+<h1 align="center">Veloce</h1>
+
+<p align="center">
+  <strong>High-performance cross-platform local &amp; global P2P file transfer built in Rust.</strong>
+</p>
 
 Veloce combines zero-configuration LAN transfers (mDNS auto-discovery + explicit approval) with ephemeral, torrent-style global transfers powered by **QUIC (BBR)**, **BLAKE3 Merkle chunking**, **UDP hole-punching**, and a **blind end-to-end encrypted relay** fallback. One pure-Rust core powers the Electron desktop app, Flutter Android/iOS mobile app, standalone CLI (`veloce`), and stateless UDP relay (`veloce-relay`).
 

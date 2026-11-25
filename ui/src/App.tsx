@@ -7,7 +7,6 @@ import {
   Sun,
   Trash2,
   X,
-  Zap,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { IncomingOfferModal } from "./components/IncomingOfferModal";
@@ -15,6 +14,7 @@ import { ReceiveView } from "./components/ReceiveView";
 import { SendView } from "./components/SendView";
 import { SettingsModal } from "./components/SettingsModal";
 import { TransferCard } from "./components/TransferCard";
+import { VeloceLogo } from "./components/VeloceLogo";
 import type {
   DesktopSettings,
   EngineEvent,
@@ -510,7 +510,7 @@ export function App() {
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">
-            <Zap size={18} />
+            <VeloceLogo size={36} />
           </div>
           <div>
             <h1>Veloce</h1>

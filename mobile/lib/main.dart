@@ -7,6 +7,7 @@ import 'src/services/frb_rust_bridge.dart';
 import 'src/state/veloce_controller.dart';
 import 'src/widgets/incoming_offer_sheet.dart';
 import 'src/widgets/settings_sheet.dart';
+import 'src/widgets/veloce_logo.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -101,15 +102,25 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
           home: Builder(
             builder: (innerCtx) => Scaffold(
               appBar: AppBar(
-                title: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                title: Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Text('Veloce', style: TextStyle(fontWeight: FontWeight.w700)),
-                    if (_controller.nodeInfo != null)
-                      Text(
-                        '${_controller.nodeInfo!.deviceName} • ${_controller.nodeInfo!.shortId}',
-                        style: Theme.of(innerCtx).textTheme.labelSmall,
+                    const VeloceLogoMark(size: 30),
+                    const SizedBox(width: 10),
+                    Flexible(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Veloce', style: TextStyle(fontWeight: FontWeight.w700)),
+                          if (_controller.nodeInfo != null)
+                            Text(
+                              '${_controller.nodeInfo!.deviceName} • ${_controller.nodeInfo!.shortId}',
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(innerCtx).textTheme.labelSmall,
+                            ),
+                        ],
                       ),
+                    ),
                   ],
                 ),
                 actions: [
