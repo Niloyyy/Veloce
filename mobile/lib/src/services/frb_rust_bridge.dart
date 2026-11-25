@@ -24,6 +24,7 @@ class FrbVeloceBridge implements VeloceRustBridge {
     required List<String> relayAddrs,
     required AppTransferProfile profile,
     required List<String> overrideLanAddrs,
+    String? identityKeyPath,
   }) async {
     final res = await frb.initMobileEngine(
       deviceName: deviceName,
@@ -33,6 +34,7 @@ class FrbVeloceBridge implements VeloceRustBridge {
           ? frb.MobileTransferProfile.mobile
           : frb.MobileTransferProfile.desktop,
       overrideLanAddrs: overrideLanAddrs,
+      identityKeyPath: identityKeyPath,
     );
     return AppNodeInfo(
       nodeId: res.nodeId,

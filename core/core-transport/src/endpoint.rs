@@ -125,6 +125,9 @@ pub struct EndpointOptions {
     pub override_lan_addrs: Vec<IpAddr>,
     /// Forces virtual peer traffic through the relay (useful for symmetric NAT testing).
     pub force_relay: bool,
+    /// Optional path where the node's Ed25519 PKCS#8 private key is persisted across restarts
+    /// so trusted-device pinning keeps working permanently.
+    pub identity_key_path: Option<PathBuf>,
 }
 
 impl Default for EndpointOptions {
@@ -141,6 +144,7 @@ impl Default for EndpointOptions {
             profile: TransferProfile::Desktop,
             override_lan_addrs: Vec::new(),
             force_relay: false,
+            identity_key_path: None,
         }
     }
 }
@@ -157,7 +161,10 @@ impl VeloceEndpoint {
     /// Binds a multiplexed `MagicUdpSocket` under QUIC with BBR congestion control,
     /// Ed25519 mutual TLS 1.3, optional mDNS discovery, and NAT/relay coordination.
     pub async fn bind(opts: EndpointOptions) -> Result<(Arc<Self>, EndpointChannels)> {
-        let identity = PeerIdentity::generate()?;
+        let identity = match opts.identity_key_path.as_deref() {
+            Some(path) => PeerIdentity::load_or_generate(path)?,
+            None => PeerIdentity::generate()?,
+        };
         let transport_config = build_bbr_transport_config_for_profile(opts.profile)?;
         let server_config = identity.build_server_config(Arc::clone(&transport_config))?;
 

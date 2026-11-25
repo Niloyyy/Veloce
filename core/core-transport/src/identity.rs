@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,7 +33,43 @@ impl PeerIdentity {
     pub fn generate() -> Result<Self> {
         let key_pair = KeyPair::generate_for(&PKCS_ED25519)
             .map_err(|e| TransportError::Tls(format!("ed25519 keygen failed: {e}")))?;
+        Self::from_key_pair(key_pair)
+    }
 
+    /// Loads a persisted PKCS#8 DER Ed25519 keypair from `path`, or generates and atomically
+    /// persists a new keypair so this device keeps a stable cryptographic `NodeId` across restarts.
+    pub fn load_or_generate(path: &Path) -> Result<Self> {
+        if let Ok(der_bytes) = std::fs::read(path) {
+            let pkcs8 = PrivatePkcs8KeyDer::from(der_bytes);
+            if let Ok(key_pair) = KeyPair::try_from(&pkcs8) {
+                if let Ok(identity) = Self::from_key_pair(key_pair) {
+                    return Ok(identity);
+                }
+            }
+        }
+
+        let key_pair = KeyPair::generate_for(&PKCS_ED25519)
+            .map_err(|e| TransportError::Tls(format!("ed25519 keygen failed: {e}")))?;
+        let identity = Self::from_key_pair(key_pair)?;
+
+        // Best-effort atomic persistence with owner-only permissions on Unix.
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp_path = path.with_extension("key.tmp");
+        if std::fs::write(&tmp_path, &identity.key_der).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
+            }
+            let _ = std::fs::rename(&tmp_path, path);
+        }
+
+        Ok(identity)
+    }
+
+    fn from_key_pair(key_pair: KeyPair) -> Result<Self> {
         let pub_raw = key_pair.public_key_raw();
         if pub_raw.len() != 32 {
             return Err(TransportError::Tls(format!(

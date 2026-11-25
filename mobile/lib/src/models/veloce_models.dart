@@ -241,6 +241,7 @@ abstract class VeloceRustBridge {
     required List<String> relayAddrs,
     required AppTransferProfile profile,
     required List<String> overrideLanAddrs,
+    String? identityKeyPath,
   });
 
   Stream<AppEngineEvent> subscribeEvents();

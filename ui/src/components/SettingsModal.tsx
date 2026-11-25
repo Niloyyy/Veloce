@@ -1,6 +1,6 @@
-import { FolderOpen, RotateCcw, SlidersHorizontal, X } from "lucide-react";
+import { FolderOpen, RotateCcw, ShieldCheck, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { useState } from "react";
-import type { DesktopSettings, ThemeId } from "../types/veloce";
+import type { DesktopSettings, ThemeId, TrustedPeer } from "../types/veloce";
 import { THEME_OPTIONS } from "../utils/themes";
 
 interface SettingsModalProps {
@@ -25,6 +25,7 @@ export function SettingsModal({
   const [relayText, setRelayText] = useState(settings.relayAddrs.join(", "));
   const [parallelStreams, setParallelStreams] = useState(settings.parallelStreams);
   const [selectedTheme, setSelectedTheme] = useState<ThemeId>(settings.theme);
+  const [trustedPeers, setTrustedPeers] = useState<TrustedPeer[]>(settings.trustedPeers ?? []);
   const [error, setError] = useState<string | null>(null);
 
   const handleBrowse = async () => {
@@ -52,6 +53,7 @@ export function SettingsModal({
         relayAddrs,
         parallelStreams,
         theme: selectedTheme,
+        trustedPeers,
       });
       onClose();
     } catch (err) {
@@ -205,6 +207,41 @@ export function SettingsModal({
                 </button>
               ))}
             </div>
+          </div>
+
+          <div className="field-group">
+            <span className="input-label">Trusted Devices (Auto-Accept)</span>
+            {trustedPeers.length === 0 ? (
+              <span className="field-hint">
+                No trusted devices yet. Click the shield icon on a nearby device or check
+                &ldquo;Trust&rdquo; when accepting an offer to auto-accept transfers pinned to its
+                cryptographic Ed25519 Node ID.
+              </span>
+            ) : (
+              <ul className="trusted-list">
+                {trustedPeers.map((peer) => (
+                  <li key={peer.nodeId} className="trusted-list-row">
+                    <div className="trusted-list-info">
+                      <ShieldCheck size={14} className="trusted-icon" />
+                      <strong>{peer.deviceName}</strong>
+                      <code>{peer.shortId}</code>
+                    </div>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title={`Remove ${peer.deviceName}`}
+                      onClick={() =>
+                        setTrustedPeers((prev) =>
+                          prev.filter((p) => p.nodeId !== peer.nodeId),
+                        )
+                      }
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
 
           {error && <div className="inline-error">{error}</div>}

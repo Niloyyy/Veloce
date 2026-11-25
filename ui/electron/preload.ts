@@ -8,12 +8,23 @@ const veloceApi = {
     downloadDir?: string;
     relayAddrs?: string[];
     parallelStreams?: number;
-    theme?: "dark" | "light";
+    theme?: string;
+    trustedPeers?: Array<{
+      nodeId: string;
+      shortId: string;
+      deviceName: string;
+      addedAt: number;
+    }>;
   }) => ipcRenderer.invoke("veloce:updateSettings", settings),
   pickFiles: () => ipcRenderer.invoke("veloce:pickFiles"),
   pickFolders: () => ipcRenderer.invoke("veloce:pickFolders"),
   pickOutputDir: () => ipcRenderer.invoke("veloce:pickOutputDir"),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
+  createTextClip: (text: string) => ipcRenderer.invoke("veloce:createTextClip", text),
+  readTextClip: (filePath: string) => ipcRenderer.invoke("veloce:readTextClip", filePath),
+  openPath: (filePath: string) => ipcRenderer.invoke("veloce:openPath", filePath),
+  showInFolder: (filePath: string) => ipcRenderer.invoke("veloce:showInFolder", filePath),
+  openExternalUrl: (url: string) => ipcRenderer.invoke("veloce:openExternalUrl", url),
   startSession: (args: {
     paths: string[];
     targetPeerNodeId?: string;

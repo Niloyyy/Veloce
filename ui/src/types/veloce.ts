@@ -9,12 +9,20 @@ export interface NodeInfo {
   listenPort: number;
 }
 
+export interface TrustedPeer {
+  nodeId: string;
+  shortId: string;
+  deviceName: string;
+  addedAt: number;
+}
+
 export interface DesktopSettings {
   deviceName: string;
   downloadDir: string;
   relayAddrs: string[];
   parallelStreams: number;
   theme: ThemeId;
+  trustedPeers: TrustedPeer[];
 }
 
 export interface EngineStatus {
@@ -156,6 +164,7 @@ export interface TransferRecord {
   connectionType: ConnectionType;
   error?: string;
   outputPaths?: string[];
+  textContent?: string;
 }
 
 export interface VeloceBridgeApi {
@@ -168,6 +177,11 @@ export interface VeloceBridgeApi {
   pickFolders: () => Promise<string[]>;
   pickOutputDir: () => Promise<string | null>;
   getPathForFile: (file: File) => string;
+  createTextClip: (text: string) => Promise<{ path: string; bytes: number }>;
+  readTextClip: (filePath: string) => Promise<string | null>;
+  openPath: (filePath: string) => Promise<string | null>;
+  showInFolder: (filePath: string) => Promise<boolean>;
+  openExternalUrl: (url: string) => Promise<boolean>;
   startSession: (args: {
     paths: string[];
     targetPeerNodeId?: string;

@@ -1,26 +1,44 @@
-import { FileUp, FolderPlus, Laptop, Send, UploadCloud } from "lucide-react";
+import {
+  ClipboardPaste,
+  FileUp,
+  FolderPlus,
+  Laptop,
+  MessageSquareText,
+  QrCode,
+  Send,
+  Shield,
+  ShieldCheck,
+  UploadCloud,
+} from "lucide-react";
 import { useState } from "react";
 import type { PeerDto, StartSessionResult } from "../types/veloce";
 import { QrCodeCard } from "./QrCodeCard";
 
 interface SendViewProps {
   peers: PeerDto[];
+  trustedNodeIds: ReadonlySet<string>;
   activeSession: StartSessionResult | null;
   hasRelay: boolean;
   busy: boolean;
   onStartSession: (paths: string[], targetPeerNodeId?: string) => Promise<void>;
+  onSendText: (text: string, targetPeerNodeId?: string) => Promise<void>;
+  onToggleTrustPeer: (peer: PeerDto) => void;
   onStopSharing: () => void;
 }
 
 export function SendView({
   peers,
+  trustedNodeIds,
   activeSession,
   hasRelay,
   busy,
   onStartSession,
+  onSendText,
+  onToggleTrustPeer,
   onStopSharing,
 }: SendViewProps) {
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+  const [quickText, setQuickText] = useState("");
   const [dragging, setDragging] = useState(false);
 
   const handleSelectFiles = async () => {
@@ -62,6 +80,26 @@ export function SendView({
     await onStartSession(paths, peer.nodeId);
   };
 
+  const handlePasteClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) setQuickText(text);
+    } catch {
+      // Ignore clipboard permission denials.
+    }
+  };
+
+  const handleBeamText = async (targetPeerNodeId?: string) => {
+    const trimmed = quickText.trim();
+    if (!trimmed) return;
+    await onSendText(trimmed, targetPeerNodeId);
+    if (targetPeerNodeId) {
+      setQuickText("");
+    }
+  };
+
+  const hasQuickText = quickText.trim().length > 0;
+
   return (
     <div className="view-stack">
       <div
@@ -78,7 +116,7 @@ export function SendView({
         </div>
         <h2>Drop files or folders to share</h2>
         <p className="muted-sm">
-          Instant BLAKE3 Merkle chunking • Multi-stream QUIC (BBR) • Line-speed LAN & Global P2P
+          Instant BLAKE3 Merkle chunking • Multi-stream QUIC (BBR) • Line-speed LAN &amp; Global P2P
         </p>
 
         <div className="dropzone-buttons">
@@ -116,6 +154,48 @@ export function SendView({
         )}
       </div>
 
+      <section className="panel quick-text-panel">
+        <div className="panel-header">
+          <h3 className="panel-title-inline">
+            <MessageSquareText size={16} />
+            <span>Quick Text &amp; Link Beam</span>
+          </h3>
+          <button
+            className="btn-secondary btn-sm"
+            type="button"
+            disabled={busy}
+            onClick={handlePasteClipboard}
+            title="Paste from clipboard"
+          >
+            <ClipboardPaste size={13} />
+            <span>Paste</span>
+          </button>
+        </div>
+        <textarea
+          className="text-input quick-text-input"
+          rows={2}
+          value={quickText}
+          onChange={(e) => setQuickText(e.target.value)}
+          placeholder="Paste a URL, Wi-Fi password, code snippet, or note to beam over E2EE QUIC..."
+        />
+        <div className="quick-text-actions">
+          <span className="muted-xs">
+            {hasQuickText
+              ? "Click Text on any nearby device below, or create a QR / Ticket."
+              : "Works across LAN push and Global QR / Session Tickets."}
+          </span>
+          <button
+            className="btn-secondary btn-sm"
+            type="button"
+            disabled={busy || !hasQuickText}
+            onClick={() => handleBeamText()}
+          >
+            <QrCode size={13} />
+            <span>Share via QR / Ticket</span>
+          </button>
+        </div>
+      </section>
+
       {activeSession && (
         <QrCodeCard
           session={activeSession}
@@ -144,29 +224,68 @@ export function SendView({
           </div>
         ) : (
           <div className="peers-grid">
-            {peers.map((peer) => (
-              <button
-                key={peer.nodeId}
-                type="button"
-                className="peer-card"
-                disabled={busy}
-                onClick={() => handleSendToLanPeer(peer)}
-              >
-                <div className="peer-avatar">
-                  <Laptop size={18} />
+            {peers.map((peer) => {
+              const isTrusted = trustedNodeIds.has(peer.nodeId);
+              return (
+                <div key={peer.nodeId} className="peer-card peer-card-row">
+                  <div className="peer-avatar">
+                    <Laptop size={18} />
+                  </div>
+                  <div className="peer-info">
+                    <div className="peer-name-row">
+                      <strong>{peer.deviceName}</strong>
+                      {isTrusted && (
+                        <span
+                          className="trusted-pill"
+                          title="Trusted Ed25519 identity — incoming offers auto-accept"
+                        >
+                          <ShieldCheck size={11} />
+                          Trusted
+                        </span>
+                      )}
+                    </div>
+                    <span className="muted-xs">
+                      {peer.shortId} • {peer.addresses[0] ?? "LAN"}
+                    </span>
+                  </div>
+                  <div className="peer-card-actions">
+                    <button
+                      type="button"
+                      className={`icon-btn ${isTrusted ? "icon-btn-trusted" : ""}`}
+                      title={
+                        isTrusted
+                          ? `Remove ${peer.deviceName} from Trusted Devices`
+                          : `Trust ${peer.deviceName} (auto-accept incoming transfers)`
+                      }
+                      onClick={() => onToggleTrustPeer(peer)}
+                    >
+                      {isTrusted ? <ShieldCheck size={15} /> : <Shield size={15} />}
+                    </button>
+                    {hasQuickText && (
+                      <button
+                        type="button"
+                        className="btn-secondary btn-sm"
+                        disabled={busy}
+                        onClick={() => handleBeamText(peer.nodeId)}
+                        title={`Send quick text to ${peer.deviceName}`}
+                      >
+                        <MessageSquareText size={13} />
+                        <span>Text</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn-primary btn-sm"
+                      disabled={busy}
+                      onClick={() => handleSendToLanPeer(peer)}
+                    >
+                      <Send size={13} />
+                      <span>Send</span>
+                    </button>
+                  </div>
                 </div>
-                <div className="peer-info">
-                  <strong>{peer.deviceName}</strong>
-                  <span className="muted-xs">
-                    {peer.shortId} • {peer.addresses[0] ?? "LAN"}
-                  </span>
-                </div>
-                <span className="peer-send-tag">
-                  <Send size={13} />
-                  Send
-                </span>
-              </button>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>

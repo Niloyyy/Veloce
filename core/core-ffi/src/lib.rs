@@ -278,4 +278,37 @@ mod tests {
         sender.shutdown();
         receiver.shutdown();
     }
+
+    #[tokio::test]
+    async fn persistent_identity_key_keeps_same_node_id_across_restarts() {
+        let dir = tempdir().unwrap();
+        let key_path = dir.path().join("veloce-identity.key");
+
+        let e1 = VeloceEngine::init(EngineConfigDto {
+            device_name: "PersistNode".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
+            enable_mdns: Some(false),
+            identity_key_path: Some(key_path.display().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let id1 = e1.node_info().node_id;
+        e1.shutdown();
+
+        let e2 = VeloceEngine::init(EngineConfigDto {
+            device_name: "PersistNode".into(),
+            bind_addr: Some("127.0.0.1:0".into()),
+            enable_mdns: Some(false),
+            identity_key_path: Some(key_path.display().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let id2 = e2.node_info().node_id;
+        e2.shutdown();
+
+        assert_eq!(id1, id2);
+        assert!(key_path.exists());
+    }
 }

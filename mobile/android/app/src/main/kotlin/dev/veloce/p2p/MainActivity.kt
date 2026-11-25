@@ -1,6 +1,7 @@
 package dev.veloce.p2p
 
 import android.app.Activity
+import android.app.DownloadManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -82,8 +83,42 @@ class MainActivity : FlutterActivity() {
                                 customDisplayPath = customDisplayPath,
                                 stagingRoot = stagingRoot,
                             )
-                            mainHandler.post { result.success(exported) }
+                            mainHandler.post { result.success(exported.map { it.displayPath }) }
                         }
+                    }
+                    "exportToPublicDownloadsWithUris" -> {
+                        val paths = call.argument<List<String>>("paths") ?: emptyList()
+                        val customTreeUri = call.argument<String>("customTreeUri")
+                        val customDisplayPath = call.argument<String>("customDisplayPath")
+                        val stagingRoot = call.argument<String>("stagingRoot")
+                        ioExecutor.execute {
+                            val exported = exportCompletedFiles(
+                                paths = paths,
+                                customTreeUri = customTreeUri,
+                                customDisplayPath = customDisplayPath,
+                                stagingRoot = stagingRoot,
+                            )
+                            val mapped = exported.map {
+                                mapOf(
+                                    "displayPath" to it.displayPath,
+                                    "openUri" to it.openUri,
+                                )
+                            }
+                            mainHandler.post { result.success(mapped) }
+                        }
+                    }
+                    "openFile" -> {
+                        val uriStr = call.argument<String>("uri")
+                        val displayName = call.argument<String>("displayName")
+                        result.success(openExportedFile(uriStr, displayName))
+                    }
+                    "openFolder" -> {
+                        val treeUri = call.argument<String>("treeUri")
+                        result.success(openDestinationFolder(treeUri))
+                    }
+                    "openExternalUrl" -> {
+                        val url = call.argument<String>("url")
+                        result.success(openHttpUrl(url))
                     }
                     else -> result.notImplemented()
                 }
@@ -312,6 +347,95 @@ class MainActivity : FlutterActivity() {
         startService(intent)
     }
 
+    private data class ExportedFileRecord(
+        val displayPath: String,
+        val openUri: String,
+    )
+
+    private fun openExportedFile(uriStr: String?, displayName: String?): Boolean {
+        val cleaned = uriStr?.trim().orEmpty()
+        if (!cleaned.startsWith("content://")) return false
+        return try {
+            val uri = Uri.parse(cleaned)
+            val resolvedMime = applicationContext.contentResolver.getType(uri)
+                ?: displayName?.let { guessMimeType(it) }
+                ?: "*/*"
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, resolvedMime)
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_ACTIVITY_NEW_TASK
+                )
+            }
+            try {
+                startActivity(intent)
+                true
+            } catch (_: Exception) {
+                val fallback = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "*/*")
+                    addFlags(
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                            Intent.FLAG_ACTIVITY_NEW_TASK
+                    )
+                }
+                startActivity(Intent.createChooser(fallback, "Open with"))
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun openDestinationFolder(treeUriStr: String?): Boolean {
+        val cleaned = treeUriStr?.trim().orEmpty()
+        if (cleaned.startsWith("content://")) {
+            try {
+                val treeUri = Uri.parse(cleaned)
+                val docId = DocumentsContract.getTreeDocumentId(treeUri)
+                val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(docUri, DocumentsContract.Document.MIME_TYPE_DIR)
+                    addFlags(
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                            Intent.FLAG_ACTIVITY_NEW_TASK
+                    )
+                }
+                startActivity(intent)
+                return true
+            } catch (_: Exception) {
+                // Fall back to system Downloads viewer below.
+            }
+        }
+        return try {
+            val downloadsIntent = Intent(DownloadManager.ACTION_VIEW_DOWNLOADS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(downloadsIntent)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun openHttpUrl(rawUrl: String?): Boolean {
+        val cleaned = rawUrl?.trim().orEmpty()
+        if (
+            !cleaned.startsWith("http://", ignoreCase = true) &&
+            !cleaned.startsWith("https://", ignoreCase = true)
+        ) {
+            return false
+        }
+        return try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(cleaned)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     /**
      * Copies completed sandboxed transfer files out of app-private storage into either:
      * 1. The user's chosen Android SAF custom folder (`customTreeUri`, preserving subdirectories), or
@@ -323,7 +447,7 @@ class MainActivity : FlutterActivity() {
         customTreeUri: String?,
         customDisplayPath: String?,
         stagingRoot: String?,
-    ): List<String> {
+    ): List<ExportedFileRecord> {
         val parsedTree = if (!customTreeUri.isNullOrBlank()) {
             try {
                 Uri.parse(customTreeUri)
@@ -337,15 +461,15 @@ class MainActivity : FlutterActivity() {
             ?: parsedTree?.let { formatTreeUriDisplayName(it) }
             ?: "Custom Folder"
 
-        val results = mutableListOf<String>()
+        val results = mutableListOf<ExportedFileRecord>()
         for (rawPath in paths) {
             val srcFile = File(rawPath)
             if (!srcFile.exists() || !srcFile.isFile) {
-                results.add(rawPath)
+                results.add(ExportedFileRecord(rawPath, rawPath))
                 continue
             }
 
-            val exportedPath = if (parsedTree != null) {
+            val exportedRecord = if (parsedTree != null) {
                 val safResult = try {
                     exportViaSafTree(srcFile, parsedTree, treeLabel, stagingRoot)
                 } catch (_: Exception) {
@@ -364,18 +488,18 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
-            if (exportedPath != null) {
+            if (exportedRecord != null) {
                 srcFile.delete()
-                results.add(exportedPath)
+                results.add(exportedRecord)
             } else {
                 // Keep the verified sandbox file intact if export fails.
-                results.add(rawPath)
+                results.add(ExportedFileRecord(rawPath, rawPath))
             }
         }
         return results
     }
 
-    private fun exportToDefaultDownloads(srcFile: File): String? {
+    private fun exportToDefaultDownloads(srcFile: File): ExportedFileRecord? {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             exportViaMediaStore(srcFile)
         } else {
@@ -388,7 +512,7 @@ class MainActivity : FlutterActivity() {
         treeUri: Uri,
         treeLabel: String,
         stagingRoot: String?,
-    ): String? {
+    ): ExportedFileRecord? {
         val resolver = applicationContext.contentResolver
         val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
         var targetParentDocId = rootDocId
@@ -424,7 +548,10 @@ class MainActivity : FlutterActivity() {
                 return null
             }
             val relPrefix = if (subDirs.isEmpty()) "" else "${subDirs.joinToString("/")}/"
-            return "$treeLabel/$relPrefix$uniqueName"
+            return ExportedFileRecord(
+                displayPath = "$treeLabel/$relPrefix$uniqueName",
+                openUri = createdUri.toString(),
+            )
         } catch (err: Exception) {
             try {
                 DocumentsContract.deleteDocument(resolver, createdUri)
@@ -514,7 +641,7 @@ class MainActivity : FlutterActivity() {
         return candidate
     }
 
-    private fun exportViaMediaStore(srcFile: File): String? {
+    private fun exportViaMediaStore(srcFile: File): ExportedFileRecord? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
         val resolver = applicationContext.contentResolver
         val mimeType = guessMimeType(srcFile.name)
@@ -546,7 +673,10 @@ class MainActivity : FlutterActivity() {
                 put(MediaStore.Downloads.IS_PENDING, 0)
             }
             resolver.update(uri, publishValues, null, null)
-            return "${Environment.DIRECTORY_DOWNLOADS}/Veloce/${srcFile.name}"
+            return ExportedFileRecord(
+                displayPath = "${Environment.DIRECTORY_DOWNLOADS}/Veloce/${srcFile.name}",
+                openUri = uri.toString(),
+            )
         } catch (err: Exception) {
             resolver.delete(uri, null, null)
             throw err
@@ -554,7 +684,7 @@ class MainActivity : FlutterActivity() {
     }
 
     @Suppress("DEPRECATION")
-    private fun exportViaLegacyDownloads(srcFile: File): String? {
+    private fun exportViaLegacyDownloads(srcFile: File): ExportedFileRecord? {
         val publicRoot = Environment.getExternalStoragePublicDirectory(
             Environment.DIRECTORY_DOWNLOADS
         ) ?: return null
@@ -567,7 +697,10 @@ class MainActivity : FlutterActivity() {
                 out.flush()
             }
         }
-        return destFile.absolutePath
+        return ExportedFileRecord(
+            displayPath = destFile.absolutePath,
+            openUri = destFile.absolutePath,
+        )
     }
 
     private fun resolveUniqueFile(dir: File, filename: String): File {

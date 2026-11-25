@@ -11,12 +11,16 @@ class SettingsSheet extends StatefulWidget {
     required this.onSave,
     this.onPickSaveFolder,
     this.detectedDeviceName = '',
+    this.trustedPeers = const [],
+    this.onUntrustPeer,
   });
 
   final VeloceSettings settings;
   final ValueChanged<VeloceSettings> onSave;
   final Future<PickedSaveFolder?> Function()? onPickSaveFolder;
   final String detectedDeviceName;
+  final List<TrustedPeer> trustedPeers;
+  final ValueChanged<String>? onUntrustPeer;
 
   @override
   State<SettingsSheet> createState() => _SettingsSheetState();
@@ -235,6 +239,55 @@ class _SettingsSheetState extends State<SettingsSheet> {
                 );
               }).toList(growable: false),
             ),
+            const SizedBox(height: 16),
+            Text(
+              'Trusted Devices (Auto-Accept)',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            const SizedBox(height: 6),
+            if (widget.trustedPeers.isEmpty)
+              Text(
+                'No trusted devices yet. Tap the shield icon on a nearby device or check '
+                '"Trust" on an incoming offer to auto-accept transfers verified by Ed25519 key.',
+                style: Theme.of(context).textTheme.bodySmall,
+              )
+            else
+              Column(
+                children: widget.trustedPeers.map((peer) {
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 6),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.verified_user_rounded,
+                          size: 16,
+                          color: Color(0xFF10B981),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '${peer.deviceName} • ${peer.shortId}',
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                        if (widget.onUntrustPeer != null)
+                          IconButton(
+                            tooltip: 'Remove ${peer.deviceName}',
+                            icon: const Icon(Icons.delete_outline_rounded, size: 18),
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => widget.onUntrustPeer!(peer.nodeId),
+                          ),
+                      ],
+                    ),
+                  );
+                }).toList(growable: false),
+              ),
             const SizedBox(height: 16),
             SizedBox(
               width: double.infinity,

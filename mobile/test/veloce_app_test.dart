@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -9,6 +10,7 @@ import 'package:veloce_mobile/src/state/veloce_controller.dart';
 import 'package:veloce_mobile/src/theme/veloce_themes.dart';
 import 'package:veloce_mobile/src/utils/device_name.dart';
 import 'package:veloce_mobile/src/utils/formatters.dart';
+import 'package:veloce_mobile/src/utils/text_clip.dart';
 import 'package:veloce_mobile/src/widgets/connection_badge.dart';
 import 'package:veloce_mobile/src/widgets/settings_sheet.dart';
 import 'package:veloce_mobile/src/widgets/transfer_card.dart';
@@ -17,6 +19,7 @@ class FakeRustBridge implements VeloceRustBridge {
   final StreamController<AppEngineEvent> events = StreamController.broadcast();
   final List<String> pausedIds = [];
   final List<String> resumedIds = [];
+  final List<String> acceptedIds = [];
 
   @override
   Future<void> initRuntime() async {}
@@ -28,6 +31,7 @@ class FakeRustBridge implements VeloceRustBridge {
     required List<String> relayAddrs,
     required AppTransferProfile profile,
     required List<String> overrideLanAddrs,
+    String? identityKeyPath,
   }) async {
     return AppNodeInfo(
       nodeId: 'testnodeid',
@@ -91,7 +95,9 @@ class FakeRustBridge implements VeloceRustBridge {
   List<AppPeer> listLocalPeers() => const [];
 
   @override
-  void acceptIncomingTransfer({required String transferId, String? outputDir}) {}
+  void acceptIncomingTransfer({required String transferId, String? outputDir}) {
+    acceptedIds.add(transferId);
+  }
 
   @override
   void rejectIncomingTransfer({required String transferId, String? reason}) {}
@@ -549,5 +555,175 @@ void main() {
     await ctrl2.initialize();
     expect(ctrl2.settings.deviceName, 'Neel S24');
     ctrl2.dispose();
+  });
+
+  test('text clip helpers identify clips, extract links, and build labels', () {
+    expect(isTextClipPath('/tmp/veloce-clip-message.txt'), isTrue);
+    expect(isTextClipPath('/tmp/report.txt'), isFalse);
+    expect(
+      extractFirstHttpUrl('Check out https://github.com/Niloyyy/Veloce!'),
+      'https://github.com/Niloyyy/Veloce',
+    );
+    expect(extractFirstHttpUrl('just plain text'), isNull);
+    expect(formatTextClipLabel('https://example.com'), startsWith('Link:'));
+    expect(formatTextClipLabel('wifi-pass-123'), startsWith('Text:'));
+  });
+
+  test('VeloceController auto-accepts trusted Ed25519 peers and reads received text clips',
+      () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    SharedPreferences.setMockInitialValues({});
+    final fake = FakeRustBridge();
+    final platform = RecordingPlatformService();
+    final ctrl = VeloceController(
+      bridge: fake,
+      platformService: platform,
+      enableWakelock: false,
+    );
+
+    // 1. Untrusted sender queues an incoming offer for manual approval.
+    ctrl.handleEngineEvent(
+      const AppEventIncomingOffer(
+        transferId: 'offer1',
+        senderNodeId: 'trusted_ed25519_key_abc',
+        senderShortId: 'trusted1',
+        senderName: 'ThinkPad X1',
+        fileCount: 1,
+        totalSize: 1024,
+        files: [AppFileSummary(relativePath: 'notes.pdf', size: 1024)],
+        connectionType: 'LAN',
+      ),
+    );
+    expect(ctrl.pendingOffer?.transferId, 'offer1');
+    expect(fake.acceptedIds, isEmpty);
+
+    // Accept and pin sender as trusted.
+    await ctrl.acceptPendingOffer(trustSender: true);
+    expect(fake.acceptedIds, ['offer1']);
+    expect(ctrl.isPeerTrusted('trusted_ed25519_key_abc'), isTrue);
+
+    // 2. Subsequent offer from the same Ed25519 Node ID auto-accepts immediately!
+    ctrl.handleEngineEvent(
+      const AppEventIncomingOffer(
+        transferId: 'offer2',
+        senderNodeId: 'trusted_ed25519_key_abc',
+        senderShortId: 'trusted1',
+        senderName: 'ThinkPad X1',
+        fileCount: 1,
+        totalSize: 32,
+        files: [AppFileSummary(relativePath: kVeloceTextClipFilename, size: 32)],
+        connectionType: 'LAN',
+      ),
+    );
+    expect(ctrl.pendingOffer, isNull);
+    expect(fake.acceptedIds, ['offer1', 'offer2']);
+
+    // 3. Completing a received text clip reads textContent, cleans temp file, and skips Downloads export.
+    final tmpDir = await Directory.systemTemp.createTemp('veloce_clip_test_');
+    final clipFile = File('${tmpDir.path}/$kVeloceTextClipFilename');
+    await clipFile.writeAsString('https://veloce.dev/demo');
+
+    ctrl.handleEngineEvent(
+      AppEventTransferCompleted(
+        transferId: 'offer2',
+        direction: 'receive',
+        totalBytes: 23,
+        totalChunks: 1,
+        elapsedMs: 12,
+        averageSpeedBytesPerSec: 2048,
+        outputPaths: [clipFile.path],
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final receivedClip = ctrl.transfers.firstWhere((t) => t.transferId == 'offer2');
+    expect(receivedClip.textContent, 'https://veloce.dev/demo');
+    expect(receivedClip.outputPaths, isEmpty);
+    expect(platform.exportedBatches, isEmpty);
+    expect(await clipFile.exists(), isFalse);
+
+    await tmpDir.delete(recursive: true);
+    ctrl.dispose();
+  });
+
+  testWidgets('TransferCard renders text clip Copy/Open Link and received file Open/Folder actions',
+      (tester) async {
+    String? openedUrl;
+    var openedFile = false;
+    var openedFolder = false;
+
+    const clipItem = TransferItem(
+      transferId: 'clip1',
+      label: 'Received Link: https://github.com/Niloyyy/Veloce',
+      direction: 'receive',
+      status: TransferStatus.completed,
+      bytesTransferred: 34,
+      totalBytes: 34,
+      chunksVerified: 1,
+      totalChunks: 1,
+      speedBytesPerSec: 1024,
+      etaSeconds: 0,
+      elapsedMs: 15,
+      connectionType: 'LAN',
+      textContent: 'https://github.com/Niloyyy/Veloce',
+    );
+    const fileItem = TransferItem(
+      transferId: 'file1',
+      label: 'photo.jpg',
+      direction: 'receive',
+      status: TransferStatus.completed,
+      bytesTransferred: 4096,
+      totalBytes: 4096,
+      chunksVerified: 1,
+      totalChunks: 1,
+      speedBytesPerSec: 4096,
+      etaSeconds: 0,
+      elapsedMs: 25,
+      connectionType: 'LAN',
+      outputPaths: ['Download/Veloce/photo.jpg'],
+      openUris: ['content://media/external/downloads/42'],
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: Column(
+              children: [
+                TransferCard(
+                  item: clipItem,
+                  onPause: () {},
+                  onResume: () {},
+                  onCancel: () {},
+                  onRemove: () {},
+                  onOpenUrl: (u) => openedUrl = u,
+                ),
+                TransferCard(
+                  item: fileItem,
+                  onPause: () {},
+                  onResume: () {},
+                  onCancel: () {},
+                  onRemove: () {},
+                  onOpenFile: () => openedFile = true,
+                  onOpenFolder: () => openedFolder = true,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Copy Text'), findsOneWidget);
+    expect(find.text('Open Link'), findsOneWidget);
+    await tester.tap(find.text('Open Link'));
+    expect(openedUrl, 'https://github.com/Niloyyy/Veloce');
+
+    expect(find.text('Open'), findsOneWidget);
+    expect(find.text('Folder'), findsOneWidget);
+    await tester.tap(find.text('Open'));
+    await tester.tap(find.text('Folder'));
+    expect(openedFile, isTrue);
+    expect(openedFolder, isTrue);
   });
 }

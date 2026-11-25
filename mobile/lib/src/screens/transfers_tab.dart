@@ -74,6 +74,9 @@ class TransfersTab extends StatelessWidget {
                 onCancel: () => controller.cancelTransfer(item.transferId),
                 onRemove: () => controller.removeTransfer(item.transferId),
                 onRetry: () => controller.resumeTransfer(item.transferId),
+                onOpenFile: () => controller.openTransferFile(item),
+                onOpenFolder: controller.openSaveFolder,
+                onOpenUrl: controller.openExternalUrl,
               );
               if (!item.isTerminal) {
                 return card;

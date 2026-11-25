@@ -2,9 +2,10 @@ import 'package:flutter/material.dart';
 
 import '../models/veloce_models.dart';
 import '../utils/formatters.dart';
+import '../utils/text_clip.dart';
 import 'connection_badge.dart';
 
-class IncomingOfferSheet extends StatelessWidget {
+class IncomingOfferSheet extends StatefulWidget {
   const IncomingOfferSheet({
     super.key,
     required this.offer,
@@ -15,13 +16,25 @@ class IncomingOfferSheet extends StatelessWidget {
   });
 
   final AppEventIncomingOffer offer;
-  final VoidCallback onAccept;
+  final ValueChanged<bool> onAccept;
   final VoidCallback onReject;
   final String? saveDestinationLabel;
   final VoidCallback? onChooseSaveFolder;
 
   @override
+  State<IncomingOfferSheet> createState() => _IncomingOfferSheetState();
+}
+
+class _IncomingOfferSheetState extends State<IncomingOfferSheet> {
+  bool _trustSender = false;
+
+  @override
   Widget build(BuildContext context) {
+    final offer = widget.offer;
+    final isTextClip = offer.fileCount == 1 &&
+        offer.files.length == 1 &&
+        isTextClipPath(offer.files.first.relativePath);
+
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
@@ -36,7 +49,7 @@ class IncomingOfferSheet extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'INCOMING TRANSFER',
+                        isTextClip ? 'INCOMING QUICK TEXT / LINK' : 'INCOMING TRANSFER',
                         style: Theme.of(context).textTheme.labelSmall?.copyWith(
                               color: Theme.of(context).colorScheme.primary,
                               fontWeight: FontWeight.w700,
@@ -60,97 +73,113 @@ class IncomingOfferSheet extends StatelessWidget {
             ),
             const SizedBox(height: 14),
             Text(
-              '${offer.fileCount} item(s) • ${formatBytes(offer.totalSize)} • End-to-End TLS 1.3',
+              isTextClip
+                  ? 'Quick Text / Link • ${formatBytes(offer.totalSize)} • End-to-End TLS 1.3'
+                  : '${offer.fileCount} item(s) • ${formatBytes(offer.totalSize)} • End-to-End TLS 1.3',
               style: Theme.of(context).textTheme.bodyMedium,
             ),
-            const SizedBox(height: 10),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 160),
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: offer.files.length > 6 ? 7 : offer.files.length,
-                itemBuilder: (context, idx) {
-                  if (idx == 6) {
+            if (!isTextClip) ...[
+              const SizedBox(height: 10),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 160),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: offer.files.length > 6 ? 7 : offer.files.length,
+                  itemBuilder: (context, idx) {
+                    if (idx == 6) {
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Text(
+                          '+ ${offer.files.length - 6} more file(s)',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      );
+                    }
+                    final file = offer.files[idx];
                     return Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Text(
-                        '+ ${offer.files.length - 6} more file(s)',
-                        style: Theme.of(context).textTheme.bodySmall,
+                      padding: const EdgeInsets.symmetric(vertical: 3),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              file.relativePath,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            formatBytes(file.size),
+                            style: Theme.of(context).textTheme.labelSmall,
+                          ),
+                        ],
                       ),
                     );
-                  }
-                  final file = offer.files[idx];
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 3),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            file.relativePath,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.bodySmall,
+                  },
+                ),
+              ),
+              if (widget.saveDestinationLabel != null) ...[
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.folder_outlined, size: 17),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Save to: ${widget.saveDestinationLabel}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ),
+                      if (widget.onChooseSaveFolder != null)
+                        TextButton.icon(
+                          onPressed: widget.onChooseSaveFolder,
+                          icon: const Icon(Icons.folder_open_rounded, size: 16),
+                          label: const Text('Change'),
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        Text(
-                          formatBytes(file.size),
-                          style: Theme.of(context).textTheme.labelSmall,
-                        ),
-                      ],
-                    ),
-                  );
-                },
+                    ],
+                  ),
+                ),
+              ],
+            ],
+            const SizedBox(height: 8),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              dense: true,
+              value: _trustSender,
+              onChanged: (v) => setState(() => _trustSender = v ?? false),
+              title: Text('Trust ${offer.senderName}'),
+              subtitle: Text(
+                'Auto-accept future transfers verified by key ${offer.senderShortId}',
               ),
             ),
-            if (saveDestinationLabel != null) ...[
-              const SizedBox(height: 12),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.folder_outlined, size: 17),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        'Save to: $saveDestinationLabel',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ),
-                    if (onChooseSaveFolder != null)
-                      TextButton.icon(
-                        onPressed: onChooseSaveFolder,
-                        icon: const Icon(Icons.folder_open_rounded, size: 16),
-                        label: const Text('Change'),
-                        style: TextButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ],
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             Row(
               children: [
                 Expanded(
                   child: OutlinedButton(
-                    onPressed: onReject,
+                    onPressed: widget.onReject,
                     child: const Text('Decline'),
                   ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: FilledButton.icon(
-                    onPressed: onAccept,
+                    onPressed: () => widget.onAccept(_trustSender),
                     icon: const Icon(Icons.verified_user_rounded, size: 18),
-                    label: const Text('Accept'),
+                    label: Text(isTextClip ? 'Receive Text' : 'Accept'),
                   ),
                 ),
               ],

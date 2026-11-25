@@ -50,6 +50,7 @@ mod tests {
             vec![],
             MobileTransferProfile::Mobile,
             vec!["192.168.1.99".into()],
+            None,
         )
         .await
         .unwrap();

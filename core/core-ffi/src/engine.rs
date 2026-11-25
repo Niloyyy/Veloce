@@ -54,6 +54,9 @@ pub struct EngineConfigDto {
     #[serde(default)]
     pub override_lan_addrs: Option<Vec<String>>,
     pub force_relay: Option<bool>,
+    /// Optional path to persist this device's Ed25519 identity key across restarts.
+    #[serde(default)]
+    pub identity_key_path: Option<String>,
 }
 
 /// Static information about the local Veloce node.
@@ -282,6 +285,12 @@ impl VeloceEngine {
             .map(|n| (n as usize).clamp(1, 32))
             .unwrap_or_else(|| profile.default_parallel_streams());
 
+        let identity_key_path = config
+            .identity_key_path
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from);
+
         let opts = EndpointOptions {
             bind_addr,
             device_name: if config.device_name.trim().is_empty() {
@@ -296,6 +305,7 @@ impl VeloceEngine {
             profile,
             override_lan_addrs,
             force_relay: config.force_relay.unwrap_or(false),
+            identity_key_path,
         };
 
         let (endpoint, mut channels) = VeloceEndpoint::bind(opts).await?;

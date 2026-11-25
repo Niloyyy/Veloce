@@ -358,6 +358,7 @@ pub async fn init_mobile_engine(
     relay_addrs: Vec<String>,
     profile: MobileTransferProfile,
     override_lan_addrs: Vec<String>,
+    identity_key_path: Option<String>,
 ) -> Result<MobileNodeInfo, String> {
     // Shut down any previous instance cleanly when re-initializing (e.g. after settings change).
     shutdown();
@@ -379,6 +380,7 @@ pub async fn init_mobile_engine(
             Some(override_lan_addrs)
         },
         force_relay: Some(false),
+        identity_key_path,
     })
     .await
     .map_err(|e| e.to_string())?;

@@ -25,7 +25,14 @@ class SendTab extends StatefulWidget {
 }
 
 class _SendTabState extends State<SendTab> {
+  final TextEditingController _quickTextController = TextEditingController();
   List<String> _selectedPaths = const [];
+
+  @override
+  void dispose() {
+    _quickTextController.dispose();
+    super.dispose();
+  }
 
   Future<List<String>> _pickPaths({FileType type = FileType.any}) async {
     try {
@@ -88,11 +95,35 @@ class _SendTabState extends State<SendTab> {
     }
   }
 
+  Future<void> _pasteClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text ?? '';
+    if (text.isNotEmpty && mounted) {
+      setState(() => _quickTextController.text = text);
+    }
+  }
+
+  Future<void> _beamQuickText({String? targetPeerNodeId}) async {
+    final text = _quickTextController.text.trim();
+    if (text.isEmpty) return;
+    final ok = await widget.controller.sendTextClip(
+      text,
+      targetPeerNodeId: targetPeerNodeId,
+    );
+    if (ok && targetPeerNodeId != null) {
+      if (mounted) {
+        setState(() => _quickTextController.clear());
+      }
+      widget.onSwitchToTransfers?.call();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final ctrl = widget.controller;
     final session = ctrl.activeSession;
     final hasRelay = ctrl.settings.relayHost.trim().isNotEmpty;
+    final hasQuickText = _quickTextController.text.trim().isNotEmpty;
 
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -137,6 +168,74 @@ class _SendTabState extends State<SendTab> {
                         icon: const Icon(Icons.photo_library_outlined, size: 18),
                         label: const Text('Photos / Video'),
                       ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      Icons.chat_bubble_outline_rounded,
+                      size: 18,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Quick Text & Link Beam',
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                    ),
+                    TextButton.icon(
+                      onPressed: ctrl.busy ? null : _pasteClipboard,
+                      icon: const Icon(Icons.content_paste_rounded, size: 16),
+                      label: const Text('Paste'),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _quickTextController,
+                  minLines: 2,
+                  maxLines: 4,
+                  onChanged: (_) => setState(() {}),
+                  decoration: const InputDecoration(
+                    hintText: 'Paste a URL, password, or note to send over encrypted QUIC...',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        hasQuickText
+                            ? 'Tap Text on a nearby device below, or share via QR.'
+                            : 'Encrypted end-to-end across LAN & Global Tickets.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    OutlinedButton.icon(
+                      onPressed: ctrl.busy || !hasQuickText
+                          ? null
+                          : () => _beamQuickText(),
+                      icon: const Icon(Icons.qr_code_rounded, size: 16),
+                      label: const Text('QR / Ticket'),
                     ),
                   ],
                 ),
@@ -274,19 +373,94 @@ class _SendTabState extends State<SendTab> {
           )
         else
           for (final peer in ctrl.peers)
-            Card(
-              margin: const EdgeInsets.only(bottom: 8),
-              child: ListTile(
-                leading: const CircleAvatar(child: Icon(Icons.devices_rounded, size: 20)),
-                title: Text(peer.deviceName),
-                subtitle: Text(
-                  '${peer.shortId} • ${peer.addresses.isNotEmpty ? peer.addresses.first : 'LAN'}',
-                ),
-                trailing: FilledButton.tonal(
-                  onPressed: ctrl.busy ? null : () => _sendToLanPeer(peer),
-                  child: const Text('Send'),
-                ),
-              ),
+            Builder(
+              builder: (context) {
+                final isTrusted = ctrl.isPeerTrusted(peer.nodeId);
+                return Card(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    child: Row(
+                      children: [
+                        const CircleAvatar(
+                          child: Icon(Icons.devices_rounded, size: 20),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      peer.deviceName,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleSmall
+                                          ?.copyWith(fontWeight: FontWeight.w600),
+                                    ),
+                                  ),
+                                  if (isTrusted) ...[
+                                    const SizedBox(width: 6),
+                                    const Icon(
+                                      Icons.verified_user_rounded,
+                                      size: 15,
+                                      color: Color(0xFF10B981),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                              Text(
+                                '${peer.shortId} • ${peer.addresses.isNotEmpty ? peer.addresses.first : 'LAN'}'
+                                '${isTrusted ? ' • Trusted' : ''}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: isTrusted
+                              ? 'Untrust ${peer.deviceName}'
+                              : 'Trust ${peer.deviceName} (auto-accept)',
+                          icon: Icon(
+                            isTrusted
+                                ? Icons.verified_user_rounded
+                                : Icons.verified_user_outlined,
+                            size: 20,
+                            color: isTrusted ? const Color(0xFF10B981) : null,
+                          ),
+                          onPressed: () => ctrl.toggleTrustPeer(peer),
+                        ),
+                        if (hasQuickText) ...[
+                          OutlinedButton(
+                            onPressed: ctrl.busy
+                                ? null
+                                : () => _beamQuickText(targetPeerNodeId: peer.nodeId),
+                            style: OutlinedButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(horizontal: 10),
+                            ),
+                            child: const Text('Text'),
+                          ),
+                          const SizedBox(width: 6),
+                        ],
+                        FilledButton.tonal(
+                          onPressed: ctrl.busy ? null : () => _sendToLanPeer(peer),
+                          style: FilledButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                          ),
+                          child: const Text('Send'),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
             ),
       ],
     );

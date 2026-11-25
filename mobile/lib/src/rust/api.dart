@@ -243,6 +243,7 @@ Future<MobileNodeInfo> initMobileEngine({
   required List<String> relayAddrs,
   required MobileTransferProfile profile,
   required List<String> overrideLanAddrs,
+  String? identityKeyPath,
 }) async =>
     _unlinked();
 

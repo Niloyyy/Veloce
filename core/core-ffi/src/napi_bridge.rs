@@ -25,6 +25,7 @@ pub struct JsEngineConfig {
     pub profile: Option<String>,
     pub override_lan_addrs: Option<Vec<String>>,
     pub force_relay: Option<bool>,
+    pub identity_key_path: Option<String>,
 }
 
 impl From<JsEngineConfig> for EngineConfigDto {
@@ -45,6 +46,7 @@ impl From<JsEngineConfig> for EngineConfigDto {
             profile,
             override_lan_addrs: cfg.override_lan_addrs,
             force_relay: cfg.force_relay,
+            identity_key_path: cfg.identity_key_path,
         }
     }
 }

@@ -18,6 +18,17 @@ class PickedSaveFolder {
   bool get isContentUri => uri.startsWith('content://');
 }
 
+/// Exported received file record containing both user-facing path and launchable URI.
+class ExportedFileEntry {
+  const ExportedFileEntry({
+    required this.displayPath,
+    required this.openUri,
+  });
+
+  final String displayPath;
+  final String openUri;
+}
+
 /// Platform MethodChannel bridge for Android MulticastLock, Foreground Service,
 /// API 30+ Wi-Fi LAN IP enumeration, and SAF custom destination folder selection/export.
 /// Safe no-op on iOS and test hosts.
@@ -197,6 +208,107 @@ class VelocePlatformService {
       return sourcePaths;
     } on PlatformException {
       return sourcePaths;
+    }
+  }
+
+  /// Exports completed files like `exportToPublicDownloads`, also returning each
+  /// exported file's launchable `content://` URI on Android so the user can tap Open.
+  Future<List<ExportedFileEntry>> exportToPublicDownloadsWithUris(
+    List<String> sourcePaths, {
+    String? customTreeUri,
+    String? customDisplayPath,
+    String? stagingRoot,
+  }) async {
+    if (sourcePaths.isEmpty) return const [];
+    try {
+      final rawList = await _channel.invokeListMethod<dynamic>(
+        'exportToPublicDownloadsWithUris',
+        {
+          'paths': sourcePaths,
+          if (customTreeUri != null && customTreeUri.isNotEmpty)
+            'customTreeUri': customTreeUri,
+          if (customDisplayPath != null && customDisplayPath.isNotEmpty)
+            'customDisplayPath': customDisplayPath,
+          if (stagingRoot != null && stagingRoot.isNotEmpty)
+            'stagingRoot': stagingRoot,
+        },
+      );
+      if (rawList != null && rawList.isNotEmpty) {
+        final entries = <ExportedFileEntry>[];
+        for (final item in rawList) {
+          if (item is Map) {
+            final displayPath = item['displayPath']?.toString() ?? '';
+            final openUri = item['openUri']?.toString() ?? displayPath;
+            if (displayPath.isNotEmpty) {
+              entries.add(
+                ExportedFileEntry(displayPath: displayPath, openUri: openUri),
+              );
+            }
+          }
+        }
+        if (entries.isNotEmpty) return entries;
+      }
+    } on MissingPluginException {
+      // Fall back to exportToPublicDownloads below (also supports test subclasses).
+    } on PlatformException {
+      // Fall back below.
+    }
+
+    final paths = await exportToPublicDownloads(
+      sourcePaths,
+      customTreeUri: customTreeUri,
+      customDisplayPath: customDisplayPath,
+      stagingRoot: stagingRoot,
+    );
+    return paths
+        .map((p) => ExportedFileEntry(displayPath: p, openUri: p))
+        .toList(growable: false);
+  }
+
+  /// Launches a received Android `content://` file URI in the system viewer.
+  Future<bool> openFile({required String uri, String? displayName}) async {
+    if (uri.trim().isEmpty) return false;
+    try {
+      final ok = await _channel.invokeMethod<bool>('openFile', {
+        'uri': uri,
+        if (displayName != null && displayName.isNotEmpty)
+          'displayName': displayName,
+      });
+      return ok ?? false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  /// Opens the configured SAF destination folder or system Downloads on Android.
+  Future<bool> openFolder({String? treeUri}) async {
+    try {
+      final ok = await _channel.invokeMethod<bool>('openFolder', {
+        if (treeUri != null && treeUri.isNotEmpty) 'treeUri': treeUri,
+      });
+      return ok ?? false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  /// Opens an `http://` or `https://` URL in the system browser on Android.
+  Future<bool> openExternalUrl(String url) async {
+    final trimmed = url.trim();
+    if (trimmed.isEmpty) return false;
+    try {
+      final ok = await _channel.invokeMethod<bool>('openExternalUrl', {
+        'url': trimmed,
+      });
+      return ok ?? false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
     }
   }
 }

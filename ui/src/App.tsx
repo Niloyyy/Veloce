@@ -8,7 +8,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { IncomingOfferModal } from "./components/IncomingOfferModal";
 import { ReceiveView } from "./components/ReceiveView";
 import { SendView } from "./components/SendView";
@@ -24,7 +24,9 @@ import type {
   StartSessionResult,
   ThemeId,
   TransferRecord,
+  TrustedPeer,
 } from "./types/veloce";
+import { formatTextClipLabel, isTextClipPath } from "./utils/textClip";
 import { nextThemeId, themeLabel } from "./utils/themes";
 
 type ActiveTab = "send" | "receive";
@@ -89,6 +91,7 @@ export function App() {
     relayAddrs: [],
     parallelStreams: 8,
     theme: "dark",
+    trustedPeers: [],
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
@@ -101,6 +104,17 @@ export function App() {
   const [pendingOffer, setPendingOffer] = useState<IncomingOfferEvent | null>(null);
   const [busy, setBusy] = useState(false);
   const [bannerError, setBannerError] = useState<string | null>(null);
+
+  const trustedPeersRef = useRef<TrustedPeer[]>(settings.trustedPeers);
+  const outputDirRef = useRef<string>(outputDir);
+
+  useEffect(() => {
+    trustedPeersRef.current = settings.trustedPeers;
+  }, [settings.trustedPeers]);
+
+  useEffect(() => {
+    outputDirRef.current = outputDir;
+  }, [outputDir]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -157,9 +171,45 @@ export function App() {
       case "PeerLost":
         setPeers((prev) => prev.filter((p) => p.nodeId !== evt.nodeId));
         break;
-      case "IncomingOffer":
-        setPendingOffer(evt);
+      case "IncomingOffer": {
+        const isTrusted = trustedPeersRef.current.some(
+          (p) => p.nodeId === evt.senderNodeId,
+        );
+        const isTextClip =
+          evt.fileCount === 1 &&
+          evt.files.length === 1 &&
+          isTextClipPath(evt.files[0].relativePath);
+        const destDir = outputDirRef.current;
+
+        if (isTrusted && destDir) {
+          setTransfers((prev) => ({
+            ...prev,
+            [evt.transferId]: {
+              transferId: evt.transferId,
+              label: isTextClip
+                ? `Quick Text from ${evt.senderName}`
+                : `Auto-accepted from ${evt.senderName} (${evt.fileCount} item(s))`,
+              direction: "receive",
+              status: "active",
+              bytesTransferred: 0,
+              totalBytes: evt.totalSize,
+              chunksVerified: 0,
+              totalChunks: 0,
+              speedBytesPerSec: 0,
+              speedHistory: [],
+              etaSeconds: 0,
+              connectionType: evt.connectionType,
+            },
+          }));
+          void window.veloce?.acceptIncoming({
+            transferId: evt.transferId,
+            outputDir: destDir,
+          });
+        } else {
+          setPendingOffer(evt);
+        }
         break;
+      }
       case "ConnectionTypeChanged":
         setTransfers((prev) => {
           const existing = prev[evt.transferId];
@@ -227,7 +277,12 @@ export function App() {
           };
         });
         break;
-      case "TransferCompleted":
+      case "TransferCompleted": {
+        const isReceivedTextClip =
+          evt.direction === "receive" &&
+          evt.outputPaths.length === 1 &&
+          isTextClipPath(evt.outputPaths[0]);
+
         setTransfers((prev) => {
           const existing = prev[evt.transferId];
           return {
@@ -253,11 +308,34 @@ export function App() {
               etaSeconds: 0,
               elapsedMs: evt.elapsedMs > 0 ? evt.elapsedMs : existing?.elapsedMs,
               connectionType: existing?.connectionType ?? "LAN",
-              outputPaths: evt.outputPaths,
+              outputPaths: isReceivedTextClip ? [] : evt.outputPaths,
+              textContent: existing?.textContent,
             },
           };
         });
+
+        if (isReceivedTextClip) {
+          const clipPath = evt.outputPaths[0];
+          const tid = evt.transferId;
+          void window.veloce?.readTextClip(clipPath).then((content) => {
+            if (content == null) return;
+            setTransfers((prev) => {
+              const existing = prev[tid];
+              if (!existing) return prev;
+              return {
+                ...prev,
+                [tid]: {
+                  ...existing,
+                  label: formatTextClipLabel(content, "Received"),
+                  textContent: content,
+                  outputPaths: [],
+                },
+              };
+            });
+          });
+        }
         break;
+      }
       case "TransferFailed":
         setTransfers((prev) => {
           const existing = prev[evt.transferId];
@@ -325,6 +403,93 @@ export function App() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleSendText = async (text: string, targetPeerNodeId?: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || !window.veloce) return;
+    setBusy(true);
+    setBannerError(null);
+    try {
+      const clip = await window.veloce.createTextClip(trimmed);
+      const res = await window.veloce.startSession({
+        paths: [clip.path],
+        targetPeerNodeId,
+        relayHints: settings.relayAddrs.length > 0 ? settings.relayAddrs : undefined,
+      });
+      if (!targetPeerNodeId) {
+        setActiveSession(res);
+      } else {
+        setTransfers((prev) => ({
+          ...prev,
+          [res.transferId]: {
+            transferId: res.transferId,
+            label: formatTextClipLabel(trimmed),
+            direction: "send",
+            status: "active",
+            bytesTransferred: 0,
+            totalBytes: res.totalSize,
+            chunksVerified: 0,
+            totalChunks: res.totalChunks,
+            speedBytesPerSec: 0,
+            speedHistory: [],
+            etaSeconds: 0,
+            connectionType: "LAN",
+            textContent: trimmed,
+          },
+        }));
+      }
+    } catch (err) {
+      setBannerError(humanizeError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleToggleTrustPeer = async (peer: {
+    nodeId: string;
+    shortId: string;
+    deviceName: string;
+  }) => {
+    const exists = settings.trustedPeers.some((p) => p.nodeId === peer.nodeId);
+    const nextTrusted: TrustedPeer[] = exists
+      ? settings.trustedPeers.filter((p) => p.nodeId !== peer.nodeId)
+      : [
+          ...settings.trustedPeers,
+          {
+            nodeId: peer.nodeId,
+            shortId: peer.shortId,
+            deviceName: peer.deviceName,
+            addedAt: Date.now(),
+          },
+        ];
+    setSettings((prev) => ({ ...prev, trustedPeers: nextTrusted }));
+    try {
+      const res = await window.veloce?.updateSettings({ trustedPeers: nextTrusted });
+      if (res?.settings) {
+        setSettings(res.settings);
+      }
+    } catch (err) {
+      setBannerError(humanizeError(err));
+    }
+  };
+
+  const handleOpenFile = async (filePath: string) => {
+    const err = await window.veloce?.openPath(filePath);
+    if (err) {
+      setBannerError(`Could not open file: ${err}`);
+    }
+  };
+
+  const handleShowInFolder = async (filePath: string) => {
+    const ok = await window.veloce?.showInFolder(filePath);
+    if (ok === false) {
+      setBannerError("File no longer exists at its saved location.");
+    }
+  };
+
+  const handleOpenUrl = async (url: string) => {
+    await window.veloce?.openExternalUrl(url);
   };
 
   const handleStopSharing = async () => {
@@ -403,15 +568,31 @@ export function App() {
     }
   };
 
-  const handleAcceptOffer = async () => {
+  const handleAcceptOffer = async (trustSender = false) => {
     if (!pendingOffer || !outputDir) return;
     const offer = pendingOffer;
     setPendingOffer(null);
+    if (
+      trustSender &&
+      !settings.trustedPeers.some((p) => p.nodeId === offer.senderNodeId)
+    ) {
+      void handleToggleTrustPeer({
+        nodeId: offer.senderNodeId,
+        shortId: offer.senderShortId,
+        deviceName: offer.senderName,
+      });
+    }
+    const isTextClip =
+      offer.fileCount === 1 &&
+      offer.files.length === 1 &&
+      isTextClipPath(offer.files[0].relativePath);
     setTransfers((prev) => ({
       ...prev,
       [offer.transferId]: {
         transferId: offer.transferId,
-        label: `From ${offer.senderName} (${offer.fileCount} item(s))`,
+        label: isTextClip
+          ? `Quick Text from ${offer.senderName}`
+          : `From ${offer.senderName} (${offer.fileCount} item(s))`,
         direction: "receive",
         status: "active",
         bytesTransferred: 0,
@@ -508,6 +689,7 @@ export function App() {
   const hasFinishedTransfers = transferList.some(
     (tr) => tr.status === "completed" || tr.status === "failed" || tr.status === "cancelled",
   );
+  const trustedNodeIds = new Set(settings.trustedPeers.map((p) => p.nodeId));
 
   return (
     <div className="app-shell">
@@ -602,10 +784,13 @@ export function App() {
           {tab === "send" ? (
             <SendView
               peers={peers}
+              trustedNodeIds={trustedNodeIds}
               activeSession={activeSession}
               hasRelay={settings.relayAddrs.length > 0}
               busy={busy}
               onStartSession={handleStartSession}
+              onSendText={handleSendText}
+              onToggleTrustPeer={handleToggleTrustPeer}
               onStopSharing={handleStopSharing}
             />
           ) : (
@@ -653,6 +838,9 @@ export function App() {
                     onResume={handleResumeTransfer}
                     onCancel={handleCancelTransfer}
                     onRemove={handleRemoveTransfer}
+                    onOpenFile={handleOpenFile}
+                    onShowInFolder={handleShowInFolder}
+                    onOpenUrl={handleOpenUrl}
                   />
                 ))}
               </div>

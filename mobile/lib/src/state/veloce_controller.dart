@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
@@ -12,6 +13,42 @@ import '../models/veloce_models.dart';
 import '../services/platform_service.dart';
 import '../theme/veloce_themes.dart';
 import '../utils/device_name.dart';
+import '../utils/text_clip.dart';
+
+class TrustedPeer {
+  const TrustedPeer({
+    required this.nodeId,
+    required this.shortId,
+    required this.deviceName,
+    required this.addedAtMs,
+  });
+
+  final String nodeId;
+  final String shortId;
+  final String deviceName;
+  final int addedAtMs;
+
+  Map<String, dynamic> toJson() => {
+        'nodeId': nodeId,
+        'shortId': shortId,
+        'deviceName': deviceName,
+        'addedAtMs': addedAtMs,
+      };
+
+  factory TrustedPeer.fromJson(Map<String, dynamic> json) {
+    final nodeId = (json['nodeId'] as String? ?? '').trim();
+    final shortId = (json['shortId'] as String? ?? '').trim();
+    final deviceName = (json['deviceName'] as String? ?? '').trim();
+    return TrustedPeer(
+      nodeId: nodeId,
+      shortId: shortId.isNotEmpty
+          ? shortId
+          : (nodeId.length >= 8 ? nodeId.substring(0, 8) : nodeId),
+      deviceName: deviceName.isNotEmpty ? deviceName : shortId,
+      addedAtMs: (json['addedAtMs'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
 
 enum TransferStatus { active, paused, completed, failed, cancelled }
 
@@ -31,6 +68,8 @@ class TransferItem {
     this.elapsedMs = 0,
     this.error,
     this.outputPaths = const [],
+    this.openUris = const [],
+    this.textContent,
   });
 
   final String transferId;
@@ -47,6 +86,8 @@ class TransferItem {
   final int elapsedMs;
   final String? error;
   final List<String> outputPaths;
+  final List<String> openUris;
+  final String? textContent;
 
   bool get isTerminal =>
       status == TransferStatus.completed ||
@@ -72,6 +113,8 @@ class TransferItem {
         'elapsedMs': elapsedMs,
         'error': error,
         'outputPaths': outputPaths,
+        'openUris': openUris,
+        'textContent': textContent,
       };
 
   factory TransferItem.fromJson(Map<String, dynamic> json) {
@@ -101,6 +144,11 @@ class TransferItem {
               ?.whereType<String>()
               .toList(growable: false) ??
           const [],
+      openUris: (json['openUris'] as List<dynamic>?)
+              ?.whereType<String>()
+              .toList(growable: false) ??
+          const [],
+      textContent: json['textContent'] as String?,
     );
   }
 
@@ -118,6 +166,8 @@ class TransferItem {
     String? error,
     bool clearError = false,
     List<String>? outputPaths,
+    List<String>? openUris,
+    String? textContent,
   }) {
     return TransferItem(
       transferId: transferId,
@@ -134,6 +184,8 @@ class TransferItem {
       elapsedMs: elapsedMs ?? this.elapsedMs,
       error: clearError ? null : (error ?? this.error),
       outputPaths: outputPaths ?? this.outputPaths,
+      openUris: openUris ?? this.openUris,
+      textContent: textContent ?? this.textContent,
     );
   }
 }
@@ -228,6 +280,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   static const _prefCustomSaveUri = 'veloce.customSaveUri';
   static const _prefCustomSaveLabel = 'veloce.customSaveLabel';
   static const _prefHistory = 'veloce.transferHistory';
+  static const _prefTrustedPeers = 'veloce.trustedPeers';
 
   VeloceSettings _settings = VeloceSettings(
     deviceName: Platform.isIOS ? 'iPhone' : 'Android Device',
@@ -242,6 +295,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   String? _actionError;
   bool _busy = false;
   final Map<String, AppPeer> _peers = {};
+  final Map<String, TrustedPeer> _trustedPeers = {};
   final Map<String, TransferItem> _transfers = {};
   AppStartSessionResult? _activeSession;
   AppEventIncomingOffer? _pendingOffer;
@@ -263,6 +317,9 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   bool get busy => _busy;
   bool get isReady => _nodeInfo != null && _initError == null;
   List<AppPeer> get peers => _peers.values.toList(growable: false);
+  List<TrustedPeer> get trustedPeers =>
+      _trustedPeers.values.toList(growable: false);
+  bool isPeerTrusted(String nodeId) => _trustedPeers.containsKey(nodeId.trim());
   List<TransferItem> get transfers =>
       _transfers.values.toList(growable: false).reversed.toList(growable: false);
   int get activeTransferCount =>
@@ -350,9 +407,76 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           }
         }
       }
+
+      final rawTrusted = prefs.getString(_prefTrustedPeers);
+      if (rawTrusted != null && rawTrusted.isNotEmpty) {
+        final decoded = jsonDecode(rawTrusted);
+        if (decoded is List) {
+          for (final entry in decoded) {
+            if (entry is Map<String, dynamic>) {
+              final peer = TrustedPeer.fromJson(entry);
+              if (peer.nodeId.isNotEmpty) {
+                _trustedPeers[peer.nodeId] = peer;
+              }
+            }
+          }
+        }
+      }
     } catch (_) {
       // Keep detected device name even when SharedPreferences is unavailable in tests.
       _settings = _settings.copyWith(deviceName: detected);
+    }
+  }
+
+  Future<void> _persistTrustedPeers() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _prefTrustedPeers,
+        jsonEncode(
+          _trustedPeers.values.map((p) => p.toJson()).toList(growable: false),
+        ),
+      );
+    } catch (_) {
+      // Ignore persistence errors in headless tests.
+    }
+  }
+
+  Future<void> trustPeer({
+    required String nodeId,
+    required String shortId,
+    required String deviceName,
+  }) async {
+    final cleanId = nodeId.trim();
+    if (cleanId.isEmpty) return;
+    _trustedPeers[cleanId] = TrustedPeer(
+      nodeId: cleanId,
+      shortId: shortId.trim().isNotEmpty
+          ? shortId.trim()
+          : (cleanId.length >= 8 ? cleanId.substring(0, 8) : cleanId),
+      deviceName: deviceName.trim().isNotEmpty ? deviceName.trim() : shortId,
+      addedAtMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    _safeNotifyListeners();
+    await _persistTrustedPeers();
+  }
+
+  Future<void> untrustPeer(String nodeId) async {
+    if (_trustedPeers.remove(nodeId.trim()) != null) {
+      _safeNotifyListeners();
+      await _persistTrustedPeers();
+    }
+  }
+
+  Future<void> toggleTrustPeer(AppPeer peer) async {
+    if (isPeerTrusted(peer.nodeId)) {
+      await untrustPeer(peer.nodeId);
+    } else {
+      await trustPeer(
+        nodeId: peer.nodeId,
+        shortId: peer.shortId,
+        deviceName: peer.deviceName,
+      );
     }
   }
 
@@ -411,14 +535,25 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     return _nodeInfo?.defaultDownloadDir;
   }
 
+  Future<String?> _resolveIdentityKeyPath() async {
+    try {
+      final support = await getApplicationSupportDirectory();
+      await support.create(recursive: true);
+      return '${support.path}/veloce-identity.key';
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _startEngine() async {
     _initError = null;
-    notifyListeners();
+    _safeNotifyListeners();
     try {
       await _bridge.initRuntime();
       await _platform.acquireMulticastLock();
       final wifiAddrs = await _platform.getLocalWifiAddresses();
       final downloadDir = await _resolveDownloadDir();
+      final identityKeyPath = await _resolveIdentityKeyPath();
       final relays = _settings.relayHost
           .split(',')
           .map((s) => s.trim())
@@ -431,6 +566,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
         relayAddrs: relays,
         profile: AppTransferProfile.mobile,
         overrideLanAddrs: wifiAddrs,
+        identityKeyPath: identityKeyPath,
       );
 
       _peers.clear();
@@ -600,6 +736,113 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  /// Sends a quick UTF-8 text message or URL over Veloce's encrypted QUIC channel
+  /// either directly to a nearby LAN peer or as a shareable Global Session Ticket/QR.
+  Future<bool> sendTextClip(String rawText, {String? targetPeerNodeId}) async {
+    final trimmed = rawText.trim();
+    if (trimmed.isEmpty) return false;
+    final bytes = utf8.encode(trimmed);
+    if (bytes.length > kMaxTextClipBytes) {
+      reportError('Quick text message exceeds the 256 KB limit.');
+      return false;
+    }
+
+    _busy = true;
+    _actionError = null;
+    _safeNotifyListeners();
+    try {
+      final clipDir = Directory(
+        '${Directory.systemTemp.path}/veloce-clips/${DateTime.now().microsecondsSinceEpoch}',
+      );
+      await clipDir.create(recursive: true);
+      final clipFile = File('${clipDir.path}/$kVeloceTextClipFilename');
+      await clipFile.writeAsBytes(bytes, flush: true);
+
+      final relays = _settings.relayHost
+          .split(',')
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toList();
+      final res = await _bridge.startSession(
+        paths: [clipFile.path],
+        targetPeerNodeId: targetPeerNodeId,
+        relayHints: relays,
+      );
+      _activeSession = targetPeerNodeId == null ? res : _activeSession;
+      if (targetPeerNodeId != null) {
+        _transfers[res.transferId] = TransferItem(
+          transferId: res.transferId,
+          label: formatTextClipLabel(trimmed),
+          direction: 'send',
+          status: TransferStatus.active,
+          bytesTransferred: 0,
+          totalBytes: res.totalSize,
+          chunksVerified: 0,
+          totalChunks: res.totalChunks,
+          speedBytesPerSec: 0,
+          etaSeconds: 0,
+          connectionType: 'LAN',
+          textContent: trimmed,
+        );
+        await _syncActiveTransferGuards();
+      }
+      return true;
+    } catch (err) {
+      _actionError = _humanizeError(err);
+      return false;
+    } finally {
+      _busy = false;
+      _safeNotifyListeners();
+    }
+  }
+
+  Future<void> openTransferFile(TransferItem item) async {
+    final candidateUri =
+        item.openUris.isNotEmpty ? item.openUris.first : (item.outputPaths.isNotEmpty ? item.outputPaths.first : '');
+    if (candidateUri.isEmpty) return;
+
+    final displayName = item.outputPaths.isNotEmpty ? item.outputPaths.first : item.label;
+    if (candidateUri.startsWith('content://')) {
+      final opened = await _platform.openFile(
+        uri: candidateUri,
+        displayName: displayName,
+      );
+      if (opened) return;
+    }
+
+    final file = File(candidateUri);
+    if (await file.exists()) {
+      await Share.shareXFiles([XFile(file.path)], text: item.label);
+      return;
+    }
+
+    final openedFolder = await _platform.openFolder(
+      treeUri: _settings.customSaveUri.startsWith('content://')
+          ? _settings.customSaveUri
+          : null,
+    );
+    if (!openedFolder) {
+      reportError('Saved at $displayName. Open it from your device Files app.');
+    }
+  }
+
+  Future<void> openSaveFolder() async {
+    final treeUri = _settings.customSaveUri.startsWith('content://')
+        ? _settings.customSaveUri
+        : null;
+    final opened = await _platform.openFolder(treeUri: treeUri);
+    if (!opened) {
+      reportError('Files are saved in ${_settings.effectiveSaveLabel}.');
+    }
+  }
+
+  Future<void> openExternalUrl(String url) async {
+    final opened = await _platform.openExternalUrl(url);
+    if (!opened) {
+      await Share.share(url);
+    }
+  }
+
   void stopHostingSession() {
     final session = _activeSession;
     if (session == null) return;
@@ -648,13 +891,25 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  Future<void> acceptPendingOffer() async {
+  Future<void> acceptPendingOffer({bool trustSender = false}) async {
     final offer = _pendingOffer;
     if (offer == null) return;
     _pendingOffer = null;
+    if (trustSender) {
+      await trustPeer(
+        nodeId: offer.senderNodeId,
+        shortId: offer.senderShortId,
+        deviceName: offer.senderName,
+      );
+    }
+    final isTextClip = offer.fileCount == 1 &&
+        offer.files.length == 1 &&
+        isTextClipPath(offer.files.first.relativePath);
     _transfers[offer.transferId] = TransferItem(
       transferId: offer.transferId,
-      label: 'From ${offer.senderName} (${offer.fileCount} item(s))',
+      label: isTextClip
+          ? 'Quick Text from ${offer.senderName}'
+          : 'From ${offer.senderName} (${offer.fileCount} item(s))',
       direction: 'receive',
       status: TransferStatus.active,
       bytesTransferred: 0,
@@ -787,7 +1042,36 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
       case AppEventPeerLost(:final nodeId):
         _peers.remove(nodeId);
       case AppEventIncomingOffer():
-        _pendingOffer = event;
+        final isTextClip = event.fileCount == 1 &&
+            event.files.length == 1 &&
+            isTextClipPath(event.files.first.relativePath);
+        if (isPeerTrusted(event.senderNodeId)) {
+          _transfers[event.transferId] = TransferItem(
+            transferId: event.transferId,
+            label: isTextClip
+                ? 'Quick Text from ${event.senderName}'
+                : 'Auto-accepted from ${event.senderName} (${event.fileCount} item(s))',
+            direction: 'receive',
+            status: TransferStatus.active,
+            bytesTransferred: 0,
+            totalBytes: event.totalSize,
+            chunksVerified: 0,
+            totalChunks: 0,
+            speedBytesPerSec: 0,
+            etaSeconds: 0,
+            connectionType: event.connectionType,
+          );
+          try {
+            _bridge.acceptIncomingTransfer(
+              transferId: event.transferId,
+              outputDir: _activeReceiveOutputDir(),
+            );
+          } catch (err) {
+            _actionError = _humanizeError(err);
+          }
+        } else {
+          _pendingOffer = event;
+        }
       case AppEventConnectionTypeChanged(:final transferId, :final connectionType):
         final existing = _transfers[transferId];
         if (existing != null) {
@@ -867,14 +1151,23 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           connectionType: existing?.connectionType ?? 'LAN',
           elapsedMs: elapsedMs > 0 ? elapsedMs : (existing?.elapsedMs ?? 0),
           outputPaths: outputPaths,
+          openUris: existing?.openUris ?? outputPaths,
+          textContent: existing?.textContent,
         );
         unawaited(_persistHistory());
-        final shouldExport = direction == 'receive' &&
-            outputPaths.isNotEmpty &&
-            (_settings.customSaveUri.startsWith('content://') ||
-                (!_settings.hasCustomSaveFolder && _settings.exportToDownloads));
-        if (shouldExport) {
-          unawaited(_exportCompletedTransfer(transferId, outputPaths));
+        final isReceivedTextClip = direction == 'receive' &&
+            outputPaths.length == 1 &&
+            isTextClipPath(outputPaths.first);
+        if (isReceivedTextClip) {
+          unawaited(_consumeReceivedTextClip(transferId, outputPaths.first));
+        } else {
+          final shouldExport = direction == 'receive' &&
+              outputPaths.isNotEmpty &&
+              (_settings.customSaveUri.startsWith('content://') ||
+                  (!_settings.hasCustomSaveFolder && _settings.exportToDownloads));
+          if (shouldExport) {
+            unawaited(_exportCompletedTransfer(transferId, outputPaths));
+          }
         }
       case AppEventTransferFailed(:final transferId, :final direction, :final error):
         final existing = _transfers[transferId];
@@ -910,6 +1203,38 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     _safeNotifyListeners();
   }
 
+  Future<void> _consumeReceivedTextClip(
+    String transferId,
+    String filePath,
+  ) async {
+    try {
+      final file = File(filePath);
+      if (!await file.exists()) return;
+      final stat = await file.stat();
+      if (stat.size > kMaxTextClipBytes) return;
+      final content = await file.readAsString();
+      try {
+        await file.delete();
+      } catch (_) {
+        // Ignore cleanup failures.
+      }
+      if (_disposed) return;
+      final current = _transfers[transferId];
+      if (current != null) {
+        _transfers[transferId] = current.copyWith(
+          label: formatTextClipLabel(content, prefix: 'Received'),
+          textContent: content,
+          outputPaths: const [],
+          openUris: const [],
+        );
+        await _persistHistory();
+        _safeNotifyListeners();
+      }
+    } catch (_) {
+      // Keep file path intact if reading fails.
+    }
+  }
+
   Future<void> _exportCompletedTransfer(
     String transferId,
     List<String> outputPaths,
@@ -919,7 +1244,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
         : null;
     final displayPath =
         _settings.customSaveLabel.trim().isNotEmpty ? _settings.customSaveLabel.trim() : null;
-    final exported = await _platform.exportToPublicDownloads(
+    final exported = await _platform.exportToPublicDownloadsWithUris(
       outputPaths,
       customTreeUri: treeUri,
       customDisplayPath: displayPath,
@@ -928,7 +1253,10 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     if (_disposed) return;
     final current = _transfers[transferId];
     if (current != null && exported.isNotEmpty) {
-      _transfers[transferId] = current.copyWith(outputPaths: exported);
+      _transfers[transferId] = current.copyWith(
+        outputPaths: exported.map((e) => e.displayPath).toList(growable: false),
+        openUris: exported.map((e) => e.openUri).toList(growable: false),
+      );
       await _persistHistory();
       _safeNotifyListeners();
     }

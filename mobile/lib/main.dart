@@ -56,9 +56,9 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
               offer: offer,
               saveDestinationLabel: _controller.settings.effectiveSaveLabel,
               onChooseSaveFolder: () => _controller.chooseCustomSaveFolder(),
-              onAccept: () {
+              onAccept: (trustSender) {
                 Navigator.of(ctx).pop();
-                _controller.acceptPendingOffer();
+                _controller.acceptPendingOffer(trustSender: trustSender);
                 setState(() => _tabIndex = 2);
               },
               onReject: () {
@@ -99,11 +99,16 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
                 showModalBottomSheet<void>(
                   context: innerCtx,
                   isScrollControlled: true,
-                  builder: (_) => SettingsSheet(
-                    settings: _controller.settings,
-                    detectedDeviceName: _controller.detectedDeviceName,
-                    onSave: _controller.updateSettings,
-                    onPickSaveFolder: _controller.pickSaveFolderOnly,
+                  builder: (_) => ListenableBuilder(
+                    listenable: _controller,
+                    builder: (_, __) => SettingsSheet(
+                      settings: _controller.settings,
+                      detectedDeviceName: _controller.detectedDeviceName,
+                      trustedPeers: _controller.trustedPeers,
+                      onUntrustPeer: _controller.untrustPeer,
+                      onSave: _controller.updateSettings,
+                      onPickSaveFolder: _controller.pickSaveFolderOnly,
+                    ),
                   ),
                 );
               }

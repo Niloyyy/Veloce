@@ -1,8 +1,12 @@
 import {
   ArrowDownLeft,
   ArrowUpRight,
+  Check,
   CheckCircle2,
   Clock,
+  Copy,
+  ExternalLink,
+  FolderOpen,
   Pause,
   Play,
   RotateCcw,
@@ -11,8 +15,10 @@ import {
   X,
   XCircle,
 } from "lucide-react";
+import { useState } from "react";
 import type { TransferRecord } from "../types/veloce";
 import { formatBytes, formatDurationMs, formatEta, formatSpeed } from "../utils/format";
+import { extractFirstHttpUrl } from "../utils/textClip";
 import { ConnectionBadge } from "./ConnectionBadge";
 
 interface TransferCardProps {
@@ -21,6 +27,9 @@ interface TransferCardProps {
   onResume: (transferId: string) => void;
   onCancel: (transferId: string) => void;
   onRemove: (transferId: string) => void;
+  onOpenFile?: (filePath: string) => void;
+  onShowInFolder?: (filePath: string) => void;
+  onOpenUrl?: (url: string) => void;
 }
 
 function SpeedSparkline({ samples }: { samples: number[] }) {
@@ -49,13 +58,39 @@ export function TransferCard({
   onResume,
   onCancel,
   onRemove,
+  onOpenFile,
+  onShowInFolder,
+  onOpenUrl,
 }: TransferCardProps) {
+  const [copied, setCopied] = useState(false);
+
   const pct =
     transfer.totalBytes > 0
       ? Math.min(100, (transfer.bytesTransferred / transfer.totalBytes) * 100)
       : transfer.status === "completed"
         ? 100
         : 0;
+
+  const detectedUrl = transfer.textContent ? extractFirstHttpUrl(transfer.textContent) : null;
+  const primaryOutputPath =
+    transfer.status === "completed" &&
+    transfer.direction === "receive" &&
+    !transfer.textContent &&
+    transfer.outputPaths &&
+    transfer.outputPaths.length > 0
+      ? transfer.outputPaths[0]
+      : null;
+
+  const handleCopyText = async () => {
+    if (!transfer.textContent) return;
+    try {
+      await navigator.clipboard.writeText(transfer.textContent);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      // Ignore clipboard write errors.
+    }
+  };
 
   return (
     <div className={`transfer-card status-${transfer.status}`}>
@@ -211,6 +246,62 @@ export function TransferCard({
         </div>
         <SpeedSparkline samples={transfer.speedHistory} />
       </div>
+
+      {transfer.textContent && (
+        <div className="text-clip-box">
+          <pre className="text-clip-body">{transfer.textContent}</pre>
+          <div className="card-action-row">
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={handleCopyText}
+            >
+              {copied ? <Check size={13} /> : <Copy size={13} />}
+              <span>{copied ? "Copied" : "Copy Text"}</span>
+            </button>
+            {detectedUrl && onOpenUrl && (
+              <button
+                type="button"
+                className="btn-primary btn-sm"
+                onClick={() => onOpenUrl(detectedUrl)}
+              >
+                <ExternalLink size={13} />
+                <span>Open Link</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {primaryOutputPath && (
+        <div className="received-file-bar">
+          <span className="muted-xs truncate" title={primaryOutputPath}>
+            Saved: {primaryOutputPath}
+          </span>
+          <div className="card-action-row">
+            {onOpenFile && (
+              <button
+                type="button"
+                className="btn-secondary btn-sm"
+                onClick={() => onOpenFile(primaryOutputPath)}
+              >
+                <ExternalLink size={13} />
+                <span>Open</span>
+              </button>
+            )}
+            {onShowInFolder && (
+              <button
+                type="button"
+                className="btn-secondary btn-sm"
+                onClick={() => onShowInFolder(primaryOutputPath)}
+              >
+                <FolderOpen size={13} />
+                <span>Show in Folder</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {transfer.error && <p className="transfer-error">{transfer.error}</p>}
     </div>

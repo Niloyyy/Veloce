@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../state/veloce_controller.dart';
 import '../utils/formatters.dart';
+import '../utils/text_clip.dart';
 import 'connection_badge.dart';
 
 class TransferCard extends StatelessWidget {
@@ -13,6 +15,9 @@ class TransferCard extends StatelessWidget {
     required this.onCancel,
     required this.onRemove,
     this.onRetry,
+    this.onOpenFile,
+    this.onOpenFolder,
+    this.onOpenUrl,
   });
 
   final TransferItem item;
@@ -21,11 +26,21 @@ class TransferCard extends StatelessWidget {
   final VoidCallback onCancel;
   final VoidCallback onRemove;
   final VoidCallback? onRetry;
+  final VoidCallback? onOpenFile;
+  final VoidCallback? onOpenFolder;
+  final ValueChanged<String>? onOpenUrl;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final isSend = item.direction == 'send';
+    final textClip = item.textContent;
+    final hasTextClip = textClip != null && textClip.isNotEmpty;
+    final detectedUrl = hasTextClip ? extractFirstHttpUrl(textClip) : null;
+    final showSavedFileActions = !hasTextClip &&
+        item.outputPaths.isNotEmpty &&
+        item.status == TransferStatus.completed &&
+        item.direction == 'receive';
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -217,7 +232,95 @@ class TransferCard extends StatelessWidget {
                 ],
               ],
             ),
-            if (item.outputPaths.isNotEmpty &&
+            if (hasTextClip) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SelectableText(
+                      textClip,
+                      maxLines: 6,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            fontFamily: 'monospace',
+                          ),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 6,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: () async {
+                            await Clipboard.setData(ClipboardData(text: textClip));
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Copied to clipboard')),
+                              );
+                            }
+                          },
+                          icon: const Icon(Icons.copy_rounded, size: 15),
+                          label: const Text('Copy Text'),
+                          style: OutlinedButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                          ),
+                        ),
+                        if (detectedUrl != null && onOpenUrl != null)
+                          FilledButton.tonalIcon(
+                            onPressed: () => onOpenUrl!(detectedUrl),
+                            icon: const Icon(Icons.open_in_new_rounded, size: 15),
+                            label: const Text('Open Link'),
+                            style: FilledButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            if (showSavedFileActions) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Saved: ${item.outputPaths.first}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  if (onOpenFile != null)
+                    FilledButton.tonalIcon(
+                      onPressed: onOpenFile,
+                      icon: const Icon(Icons.open_in_new_rounded, size: 15),
+                      label: const Text('Open'),
+                      style: FilledButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                  if (onOpenFolder != null)
+                    OutlinedButton.icon(
+                      onPressed: onOpenFolder,
+                      icon: const Icon(Icons.folder_open_rounded, size: 15),
+                      label: const Text('Folder'),
+                      style: OutlinedButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                ],
+              ),
+            ] else if (!hasTextClip &&
+                item.outputPaths.isNotEmpty &&
                 item.status == TransferStatus.completed) ...[
               const SizedBox(height: 6),
               Text(

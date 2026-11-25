@@ -1,4 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -35,6 +36,7 @@ interface NativeAddon {
       parallelStreams?: number;
       relayAddrs?: string[];
       forceRelay?: boolean;
+      identityKeyPath?: string;
     }): Promise<NativeClient>;
   };
   parseTicket(ticketCode: string): string;
@@ -60,13 +62,24 @@ const THEME_BG_COLORS: Record<DesktopThemeId, string> = {
   sunset: "#140e12",
 };
 
+export interface TrustedPeer {
+  nodeId: string;
+  shortId: string;
+  deviceName: string;
+  addedAt: number;
+}
+
 export interface DesktopSettings {
   deviceName: string;
   downloadDir: string;
   relayAddrs: string[];
   parallelStreams: number;
   theme: DesktopThemeId;
+  trustedPeers: TrustedPeer[];
 }
+
+const TEXT_CLIP_FILENAME = "veloce-clip-message.txt";
+const MAX_TEXT_CLIP_BYTES = 256 * 1024;
 
 interface PersistedDesktopSettings extends DesktopSettings {
   deviceNameCustom?: boolean;
@@ -93,7 +106,12 @@ function defaultSettings(): DesktopSettings {
     relayAddrs: envRelays,
     parallelStreams: 8,
     theme: "dark",
+    trustedPeers: [],
   };
+}
+
+function identityKeyFilePath(): string {
+  return path.join(app.getPath("userData"), "veloce-identity.key");
 }
 
 function settingsFilePath(): string {
@@ -125,12 +143,41 @@ function sanitizeSettings(raw: Partial<DesktopSettings>, fallback: DesktopSettin
       ? (raw.theme as DesktopThemeId)
       : fallback.theme;
 
+  const trustedPeers: TrustedPeer[] = Array.isArray(raw.trustedPeers)
+    ? Array.from(
+        new Map(
+          raw.trustedPeers
+            .filter(
+              (p): p is TrustedPeer =>
+                Boolean(p) &&
+                typeof p.nodeId === "string" &&
+                p.nodeId.trim().length > 0 &&
+                typeof p.deviceName === "string",
+            )
+            .map((p) => {
+              const nodeId = p.nodeId.trim();
+              const shortId =
+                typeof p.shortId === "string" && p.shortId.trim().length > 0
+                  ? p.shortId.trim()
+                  : nodeId.slice(0, 8);
+              const name = p.deviceName.trim() || shortId;
+              const addedAt =
+                typeof p.addedAt === "number" && Number.isFinite(p.addedAt)
+                  ? p.addedAt
+                  : Date.now();
+              return [nodeId, { nodeId, shortId, deviceName: name, addedAt }] as const;
+            }),
+        ).values(),
+      )
+    : fallback.trustedPeers;
+
   return {
     deviceName,
     downloadDir,
     relayAddrs,
     parallelStreams,
     theme,
+    trustedPeers,
   };
 }
 
@@ -244,6 +291,7 @@ async function initNativeEngine(): Promise<void> {
       parallelStreams: currentSettings.parallelStreams,
       relayAddrs:
         currentSettings.relayAddrs.length > 0 ? currentSettings.relayAddrs : undefined,
+      identityKeyPath: identityKeyFilePath(),
     });
 
     created.onEvent((eventJson: string) => {
@@ -368,6 +416,88 @@ function registerIpcHandlers(): void {
       properties: ["openDirectory", "createDirectory"],
     });
     return res.canceled ? null : res.filePaths[0] ?? null;
+  });
+
+  ipcMain.handle("veloce:createTextClip", (_event, text: string) => {
+    if (typeof text !== "string" || text.trim().length === 0) {
+      throw new Error("Text message cannot be empty");
+    }
+    const buf = Buffer.from(text, "utf8");
+    if (buf.byteLength > MAX_TEXT_CLIP_BYTES) {
+      throw new Error("Quick text clip exceeds 256 KB limit");
+    }
+    const clipDir = path.join(
+      os.tmpdir(),
+      "veloce-clips",
+      crypto.randomBytes(8).toString("hex"),
+    );
+    fs.mkdirSync(clipDir, { recursive: true });
+    const filePath = path.join(clipDir, TEXT_CLIP_FILENAME);
+    fs.writeFileSync(filePath, buf);
+    return { path: filePath, bytes: buf.byteLength };
+  });
+
+  ipcMain.handle("veloce:readTextClip", (_event, filePath: string) => {
+    if (typeof filePath !== "string" || filePath.trim().length === 0) {
+      return null;
+    }
+    const base = path.basename(filePath).toLowerCase();
+    if (base !== TEXT_CLIP_FILENAME) {
+      return null;
+    }
+    try {
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile() || stat.size > MAX_TEXT_CLIP_BYTES) {
+        return null;
+      }
+      const content = fs.readFileSync(filePath, "utf8");
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        // Keep best-effort cleanup non-fatal.
+      }
+      return content;
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle("veloce:openPath", async (_event, filePath: string) => {
+    if (typeof filePath !== "string" || filePath.trim().length === 0) {
+      return "File path is empty";
+    }
+    if (!fs.existsSync(filePath)) {
+      return "File no longer exists at saved location";
+    }
+    const err = await shell.openPath(filePath);
+    return err || null;
+  });
+
+  ipcMain.handle("veloce:showInFolder", (_event, filePath: string) => {
+    if (typeof filePath !== "string" || filePath.trim().length === 0) {
+      return false;
+    }
+    if (!fs.existsSync(filePath)) {
+      return false;
+    }
+    shell.showItemInFolder(filePath);
+    return true;
+  });
+
+  ipcMain.handle("veloce:openExternalUrl", async (_event, rawUrl: string) => {
+    if (typeof rawUrl !== "string" || rawUrl.trim().length === 0) {
+      return false;
+    }
+    try {
+      const parsed = new URL(rawUrl.trim());
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return false;
+      }
+      await shell.openExternal(parsed.toString());
+      return true;
+    } catch {
+      return false;
+    }
   });
 
   ipcMain.handle(
