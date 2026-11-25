@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -14,15 +14,18 @@ use core_storage::ChunkSource;
 use quinn::{Endpoint, EndpointConfig, TransportConfig};
 use rand::RngCore;
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::{
-    local_lan_addrs_with_overrides, DiscoveryEvent, LanDiscovery, LocalPeer,
+    local_lan_addrs_with_overrides, local_ticket_addrs_with_overrides, DiscoveryEvent,
+    LanDiscovery, LocalPeer,
 };
 use crate::error::{Result, TransportError};
 use crate::identity::{build_bbr_transport_config_for_profile, peer_node_id, PeerIdentity};
 use crate::magic_socket::{MagicUdpSocket, PathChangeEvent};
 use crate::nat::NatCoordinator;
+use crate::port_map::{try_map_udp_port, PortMappingLease};
 use crate::transfer::{
     graceful_close, run_receiver_session_with_profile, run_sender_session, send_and_receive_hello,
     TransferProgress, TransferSummary, DEFAULT_PARALLEL_STREAMS,
@@ -97,6 +100,7 @@ pub struct VeloceEndpoint {
     discovery: Option<LanDiscovery>,
     hosted_sessions: Arc<RwLock<HashMap<[u8; 16], HostedSession>>>,
     active_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    port_mapping: Mutex<Option<PortMappingLease>>,
     progress_tx: mpsc::UnboundedSender<TransferProgress>,
     outcomes_tx: mpsc::UnboundedSender<EndpointSessionOutcome>,
     conn_changed_tx: broadcast::Sender<TransferConnectionChanged>,
@@ -126,7 +130,9 @@ pub struct EndpointOptions {
 impl Default for EndpointOptions {
     fn default() -> Self {
         Self {
-            bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            // Dual-stack [::]:0 handles native IPv6 (bypassing mobile 4G/5G IPv4 CGNAT)
+            // and IPv4 on one UDP port, automatically falling back to 0.0.0.0:0 if IPv6 is disabled.
+            bind_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
             device_name: "Veloce Node".into(),
             enable_mdns: true,
             parallel_streams: DEFAULT_PARALLEL_STREAMS,
@@ -240,6 +246,7 @@ impl VeloceEndpoint {
             discovery,
             hosted_sessions,
             active_cancellations,
+            port_mapping: Mutex::new(None),
             progress_tx,
             outcomes_tx,
             conn_changed_tx,
@@ -319,8 +326,18 @@ impl VeloceEndpoint {
         rand::thread_rng().fill_bytes(&mut session_token);
 
         let mut direct_addrs =
-            local_lan_addrs_with_overrides(self.listen_addr.port(), &self.override_lan_addrs);
-        if let Some(public) = self.nat.public_addr() {
+            local_ticket_addrs_with_overrides(self.listen_addr.port(), &self.override_lan_addrs);
+        if let Some(lease) = self
+            .port_mapping
+            .lock()
+            .expect("port_mapping lock poisoned")
+            .clone()
+        {
+            if !direct_addrs.contains(&lease.external_addr) {
+                direct_addrs.push(lease.external_addr);
+            }
+        }
+        for public in self.nat.public_addrs() {
             if !direct_addrs.contains(&public) {
                 direct_addrs.push(public);
             }
@@ -426,10 +443,45 @@ impl VeloceEndpoint {
             }
         }
 
-        // If no relay gave us a reflexive public address, try standard RFC 5389 STUN on our UDP socket
-        // so direct Cone-NAT WAN transfers can connect without manual port-forwarding.
-        if allow_public_stun && self.nat.public_addr().is_none() && !self.magic_socket.is_force_relay() {
-            let _ = self.nat.discover_public_addr_rfc5389().await;
+        // Run zero-cost dual-stack RFC 5389 STUN + automatic UPnP IGD / NAT-PMP router port
+        // forwarding in parallel so Cone NAT, home Wi-Fi -> 4G/5G CGNAT, and native IPv6
+        // transfers connect directly without needing a paid relay server.
+        if allow_public_stun && !self.magic_socket.is_force_relay() {
+            let need_port_map = self
+                .port_mapping
+                .lock()
+                .expect("port_mapping lock poisoned")
+                .is_none();
+            let lan_v4s: Vec<Ipv4Addr> =
+                local_lan_addrs_with_overrides(self.listen_addr.port(), &self.override_lan_addrs)
+                    .into_iter()
+                    .filter_map(|a| match a.ip() {
+                        IpAddr::V4(v4) => Some(v4),
+                        IpAddr::V6(_) => None,
+                    })
+                    .collect();
+
+            let stun_fut = self.nat.discover_public_addrs_rfc5389();
+            let port_map_fut = async {
+                if need_port_map && self.magic_socket.supports_ipv4() {
+                    try_map_udp_port(self.listen_addr.port(), &lan_v4s).await
+                } else {
+                    None
+                }
+            };
+
+            let (_stun_addrs, maybe_lease) = tokio::join!(stun_fut, port_map_fut);
+            if let Some(lease) = maybe_lease {
+                tracing::info!(
+                    protocol = ?lease.protocol,
+                    external_addr = %lease.external_addr,
+                    "Mapped public UDP port on local router for direct P2P"
+                );
+                *self
+                    .port_mapping
+                    .lock()
+                    .expect("port_mapping lock poisoned") = Some(lease);
+            }
         }
 
         self.host_session(source, extra_addrs, relay_hints)
@@ -487,35 +539,63 @@ impl VeloceEndpoint {
             }
         }
 
-        // Step 1: Attempt direct LAN/WAN connection first unless force_relay is set.
-        if !self.magic_socket.is_force_relay() {
+        // Step 1: Race all direct LAN / IPv6 / UPnP / STUN / mesh-VPN candidates in parallel
+        // (Happy Eyeballs) so unreachable private LAN IPs never stall public IPv6/WAN dials.
+        if !self.magic_socket.is_force_relay() && !direct_candidates.is_empty() {
             let direct_timeout = if relays.is_empty() {
                 Duration::from_secs(6)
             } else {
-                Duration::from_millis(1200)
+                Duration::from_millis(1500)
             };
-            for &addr in &direct_candidates {
-                if let Ok(conn) = self
-                    .connect_verified_with_timeout(addr, Some(ticket.node_id), direct_timeout)
-                    .await
+            let supports_v4 = self.magic_socket.supports_ipv4();
+            let supports_v6 = self.magic_socket.supports_ipv6();
+            let server_name = format!("{}.veloce.local", ticket.node_id.to_base32());
+
+            if let Ok(client_cfg) = self
+                .identity
+                .build_client_config(Some(ticket.node_id), Arc::clone(&self.transport_config))
+            {
+                let mut racers: JoinSet<std::result::Result<(SocketAddr, quinn::Connection), ()>> =
+                    JoinSet::new();
+                for &addr in direct_candidates
+                    .iter()
+                    .filter(|a| (a.is_ipv4() && supports_v4) || (a.is_ipv6() && supports_v6))
+                    .take(16)
                 {
-                    let conn_type = classify_socket_addr(addr);
-                    let _ = self.conn_changed_tx.send(TransferConnectionChanged {
-                        transfer_id: transfer_id.clone(),
-                        peer_node_id: ticket.node_id,
-                        connection_type: conn_type,
+                    let ep = self.endpoint.clone();
+                    let cfg = client_cfg.clone();
+                    let sni = server_name.clone();
+                    racers.spawn(async move {
+                        let connecting = ep.connect_with(cfg, addr, &sni).map_err(|_| ())?;
+                        let conn = tokio::time::timeout(direct_timeout, connecting)
+                            .await
+                            .map_err(|_| ())?
+                            .map_err(|_| ())?;
+                        Ok((addr, conn))
                     });
-                    return self
-                        .pull_over_connection(
-                            transfer_id,
-                            ticket,
-                            conn,
-                            output_dir,
-                            streams,
-                            conn_type,
-                            Vec::new(),
-                        )
-                        .await;
+                }
+
+                while let Some(joined) = racers.join_next().await {
+                    if let Ok(Ok((addr, conn))) = joined {
+                        racers.abort_all();
+                        let conn_type = classify_socket_addr(addr);
+                        let _ = self.conn_changed_tx.send(TransferConnectionChanged {
+                            transfer_id: transfer_id.clone(),
+                            peer_node_id: ticket.node_id,
+                            connection_type: conn_type,
+                        });
+                        return self
+                            .pull_over_connection(
+                                transfer_id,
+                                ticket,
+                                conn,
+                                output_dir,
+                                streams,
+                                conn_type,
+                                Vec::new(),
+                            )
+                            .await;
+                    }
                 }
             }
         }
@@ -842,9 +922,21 @@ impl VeloceEndpoint {
         cancelled_any
     }
 
-    /// Stops accepting new connections and shuts down discovery & NAT tasks.
+    /// Stops accepting new connections and shuts down discovery, port mappings, & NAT tasks.
     pub fn shutdown(&self) {
         self.cancel.cancel();
+        if let Some(lease) = self
+            .port_mapping
+            .lock()
+            .expect("port_mapping lock poisoned")
+            .take()
+        {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    lease.release().await;
+                });
+            }
+        }
         if let Some(ref disc) = self.discovery {
             disc.shutdown();
         }
@@ -1203,7 +1295,7 @@ impl VeloceEndpoint {
     }
 }
 
-/// Classifies a direct socket address as `Lan` (private/loopback/link-local) or `DirectP2p` (public WAN).
+/// Classifies a direct socket address as `Lan` (private/loopback/link-local) or `DirectP2p` (public WAN / mesh VPN).
 pub fn classify_socket_addr(addr: SocketAddr) -> ConnectionType {
     match addr.ip() {
         IpAddr::V4(v4) => {
@@ -1214,6 +1306,12 @@ pub fn classify_socket_addr(addr: SocketAddr) -> ConnectionType {
             }
         }
         IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                if v4.is_private() || v4.is_loopback() || v4.is_link_local() {
+                    return ConnectionType::Lan;
+                }
+                return ConnectionType::DirectP2p;
+            }
             if v6.is_loopback() || ((v6.segments()[0] & 0xfe00) == 0xfc00) {
                 ConnectionType::Lan
             } else {

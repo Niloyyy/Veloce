@@ -1,0 +1,20 @@
+[Unit]
+Description=Veloce Stateless Encrypted UDP Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/veloce-relay --bind 0.0.0.0:7878 --max-peers 10000 --max-peers-per-ip 16 --max-mbps-per-ip 64
+Restart=on-failure
+RestartSec=3
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+CapabilityBoundingSet=
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

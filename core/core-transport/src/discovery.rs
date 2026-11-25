@@ -96,17 +96,35 @@ pub fn classify_interface_priority(iface_name: &str, ip: IpAddr) -> Option<u8> {
 /// (e.g. Android `ConnectivityManager` Wi-Fi IPs on API 30+ where `RTM_GETLINK` is restricted),
 /// filtering out virtual container/VM bridges and link-local addresses, and falling back to
 /// `getifs::local_addrs()` if full interface table enumeration is blocked by the OS.
-pub fn local_lan_addrs_with_overrides(port: u16, overrides: &[IpAddr]) -> Vec<SocketAddr> {
+///
+/// When `include_vpn_fallback` is `false` (used for LAN mDNS), VPN/mesh adapters are omitted
+/// whenever physical LAN NICs exist. When `true` (used for global `veloce1...` tickets), mesh
+/// VPN adapters (Tailscale, ZeroTier, WireGuard) are retained as lower-priority fallback candidates
+/// so zero-cost mesh VPN setups work seamlessly across strict cellular CGNAT.
+pub fn local_addrs_with_options(
+    port: u16,
+    overrides: &[IpAddr],
+    include_vpn_fallback: bool,
+) -> Vec<SocketAddr> {
     let mut ranked: Vec<(u8, SocketAddr)> = Vec::new();
 
-    // Explicit platform-supplied LAN IPs always take highest priority (tier 0).
+    // Explicit platform-supplied IPs: classify by IP type so LAN IPv4 stays tier 0,
+    // global IPv6 stays tier 2, and CGNAT/Tailscale VPN IPs (100.64.0.0/10) stay tier 3.
     for &ip in overrides {
         if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
             continue;
         }
+        let prio = match ip {
+            IpAddr::V4(v4) if v4.is_link_local() => continue,
+            IpAddr::V4(v4) if is_cgnat_or_tailscale_v4(v4) => 3,
+            IpAddr::V4(v4) if v4.is_private() => 0,
+            IpAddr::V4(_) => 1,
+            IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80 => continue,
+            IpAddr::V6(_) => 2,
+        };
         let sock = SocketAddr::new(ip, port);
         if !ranked.iter().any(|(_, existing)| *existing == sock) {
-            ranked.push((0, sock));
+            ranked.push((prio, sock));
         }
     }
 
@@ -171,13 +189,32 @@ pub fn local_lan_addrs_with_overrides(port: u16, overrides: &[IpAddr]) -> Vec<So
 
     ranked.sort_by_key(|(prio, _)| *prio);
 
-    // If real physical LAN NICs (or explicit overrides) exist (priority <= 2), omit VPN fallbacks.
-    let has_physical = ranked.iter().any(|(prio, _)| *prio <= 2);
-    ranked
-        .into_iter()
-        .filter(|(prio, _)| !has_physical || *prio <= 2)
-        .map(|(_, addr)| addr)
-        .collect()
+    if include_vpn_fallback {
+        ranked.into_iter().map(|(_, addr)| addr).collect()
+    } else {
+        // For LAN mDNS, if real physical LAN NICs exist (priority <= 2), omit VPN fallbacks.
+        let has_physical = ranked.iter().any(|(prio, _)| *prio <= 2);
+        ranked
+            .into_iter()
+            .filter(|(prio, _)| !has_physical || *prio <= 2)
+            .map(|(_, addr)| addr)
+            .collect()
+    }
+}
+
+fn is_cgnat_or_tailscale_v4(v4: std::net::Ipv4Addr) -> bool {
+    let o = v4.octets();
+    o[0] == 100 && (o[1] & 0b1100_0000) == 64
+}
+
+/// Enumerates local physical LAN addresses bound to `port` (excluding VPN adapters when physical NICs exist).
+pub fn local_lan_addrs_with_overrides(port: u16, overrides: &[IpAddr]) -> Vec<SocketAddr> {
+    local_addrs_with_options(port, overrides, false)
+}
+
+/// Enumerates local LAN, global IPv6, and mesh VPN (Tailscale/ZeroTier/WireGuard) addresses for global tickets.
+pub fn local_ticket_addrs_with_overrides(port: u16, overrides: &[IpAddr]) -> Vec<SocketAddr> {
+    local_addrs_with_options(port, overrides, true)
 }
 
 /// Enumerates local network addresses bound to `port` without explicit overrides.

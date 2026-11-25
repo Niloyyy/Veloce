@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::io::{self, IoSliceMut};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -74,6 +74,8 @@ pub struct MagicUdpSocket {
     path_events_tx: broadcast::Sender<PathChangeEvent>,
     /// Diagnostic / test knob forcing traffic for virtual routes through the relay.
     force_relay: AtomicBool,
+    is_ipv6_socket: bool,
+    is_dual_stack_v6: bool,
     configured_recv_buf: usize,
     configured_send_buf: usize,
 }
@@ -112,7 +114,7 @@ impl MagicUdpSocket {
         Arc<Self>,
         mpsc::UnboundedReceiver<(SocketAddr, SignalingMessage)>,
     )> {
-        let (std_sock, recv_buf, send_buf) =
+        let (std_sock, recv_buf, send_buf, is_ipv6_socket, is_dual_stack_v6) =
             bind_tuned_udp_socket(bind_addr, profile.udp_buffer_ladder())?;
         let udp_state = match UdpSocketState::new((&std_sock).into()) {
             Ok(state) => Some(state),
@@ -141,6 +143,8 @@ impl MagicUdpSocket {
             signaling_tx,
             path_events_tx,
             force_relay: AtomicBool::new(false),
+            is_ipv6_socket,
+            is_dual_stack_v6,
             configured_recv_buf: recv_buf,
             configured_send_buf: send_buf,
         });
@@ -153,6 +157,39 @@ impl MagicUdpSocket {
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.io.local_addr()
+    }
+
+    pub fn supports_ipv4(&self) -> bool {
+        !self.is_ipv6_socket || self.is_dual_stack_v6
+    }
+
+    pub fn supports_ipv6(&self) -> bool {
+        self.is_ipv6_socket
+    }
+
+    #[inline]
+    fn map_outbound_addr(&self, addr: SocketAddr) -> SocketAddr {
+        if self.is_dual_stack_v6 {
+            if let SocketAddr::V4(v4) = addr {
+                return SocketAddr::V6(SocketAddrV6::new(
+                    v4.ip().to_ipv6_mapped(),
+                    v4.port(),
+                    0,
+                    0,
+                ));
+            }
+        }
+        addr
+    }
+
+    #[inline]
+    fn canonicalize_inbound_addr(addr: SocketAddr) -> SocketAddr {
+        if let SocketAddr::V6(v6) = addr {
+            if let Some(v4) = v6.ip().to_ipv4_mapped() {
+                return SocketAddr::V4(SocketAddrV4::new(v4, v6.port()));
+            }
+        }
+        addr
     }
 
     pub fn configured_buffer_sizes(&self) -> (usize, usize) {
@@ -182,7 +219,9 @@ impl MagicUdpSocket {
 
     /// Sends a raw RFC 5389 STUN Binding Request datagram on the shared UDP socket.
     pub async fn send_raw_datagram(&self, dest: SocketAddr, bytes: &[u8]) -> io::Result<()> {
-        self.io.send_to(bytes, dest).await?;
+        self.io
+            .send_to(bytes, self.map_outbound_addr(dest))
+            .await?;
         Ok(())
     }
 
@@ -195,7 +234,9 @@ impl MagicUdpSocket {
         let bytes = msg
             .encode_datagram()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        self.io.send_to(&bytes, dest).await?;
+        self.io
+            .send_to(&bytes, self.map_outbound_addr(dest))
+            .await?;
         Ok(())
     }
 
@@ -210,10 +251,10 @@ impl MagicUdpSocket {
         let mut table = self.routes.write().expect("route table lock poisoned");
         if let Some(&existing_virt) = table.node_to_virtual.get(&peer_node_id) {
             if let Some(route) = table.by_virtual.get_mut(&existing_virt) {
-                if relay_addr.is_some() {
-                    route.relay_addr = relay_addr;
+                if let Some(relay) = relay_addr {
+                    route.relay_addr = Some(Self::canonicalize_inbound_addr(relay));
                 }
-                if let Some(dir) = direct_addr {
+                if let Some(dir) = direct_addr.map(Self::canonicalize_inbound_addr) {
                     if !self.force_relay.load(Ordering::Relaxed) {
                         route.direct_addr = Some(dir);
                         route.connection_type = initial_type;
@@ -228,15 +269,17 @@ impl MagicUdpSocket {
         let seq = self.next_virtual_id.fetch_add(1, Ordering::Relaxed);
         let oct3 = ((seq >> 8) & 0xFF) as u8;
         let oct4 = (seq & 0xFF).max(1) as u8;
-        let virtual_addr = SocketAddr::new(
+        let virtual_v4 = SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(VIRTUAL_IP_A, VIRTUAL_IP_B, oct3, oct4)),
             VIRTUAL_PORT,
         );
+        let virtual_addr = self.map_outbound_addr(virtual_v4);
 
+        let canonical_direct = direct_addr.map(Self::canonicalize_inbound_addr);
         let effective_direct = if self.force_relay.load(Ordering::Relaxed) {
             None
         } else {
-            direct_addr
+            canonical_direct
         };
         let effective_type = if effective_direct.is_some() {
             initial_type
@@ -246,7 +289,7 @@ impl MagicUdpSocket {
 
         let route = PeerRoute {
             peer_node_id,
-            relay_addr,
+            relay_addr: relay_addr.map(Self::canonicalize_inbound_addr),
             direct_addr: effective_direct,
             connection_type: effective_type,
         };
@@ -271,6 +314,7 @@ impl MagicUdpSocket {
         if self.force_relay.load(Ordering::Relaxed) {
             return false;
         }
+        let direct_addr = Self::canonicalize_inbound_addr(direct_addr);
         let mut table = self.routes.write().expect("route table lock poisoned");
         let Some(&virtual_addr) = table.node_to_virtual.get(&peer_node_id) else {
             return false;
@@ -325,17 +369,31 @@ impl MagicUdpSocket {
                 let octs = v4.octets();
                 octs[0] == VIRTUAL_IP_A && octs[1] == VIRTUAL_IP_B
             }
-            IpAddr::V6(_) => false,
+            IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map(|v4| {
+                    let octs = v4.octets();
+                    octs[0] == VIRTUAL_IP_A && octs[1] == VIRTUAL_IP_B
+                })
+                .unwrap_or(false),
         }
     }
 
     /// Sends a direct QUIC transmit using kernel GSO when enabled, automatically latching
     /// `gso_disabled` and falling back to segmented `try_send_to` if rejected by Android/iOS.
     fn send_direct(&self, transmit: &Transmit) -> io::Result<()> {
+        let mapped_dest = self.map_outbound_addr(transmit.destination);
+        let mapped_transmit = Transmit {
+            destination: mapped_dest,
+            ecn: transmit.ecn,
+            contents: transmit.contents,
+            segment_size: transmit.segment_size,
+            src_ip: transmit.src_ip,
+        };
         if let Some(ref state) = self.udp_state {
             if !self.gso_disabled.load(Ordering::Acquire) {
                 match self.io.try_io(Interest::WRITABLE, || {
-                    state.send((&*self.io).into(), transmit)
+                    state.send((&*self.io).into(), &mapped_transmit)
                 }) {
                     Ok(()) => return Ok(()),
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(e),
@@ -356,37 +414,65 @@ impl MagicUdpSocket {
             .unwrap_or(transmit.contents.len())
             .max(1);
         for segment in transmit.contents.chunks(seg_size) {
-            self.io.try_send_to(segment, transmit.destination)?;
+            self.io.try_send_to(segment, mapped_dest)?;
         }
         Ok(())
     }
 }
 
 /// Creates a non-blocking UDP socket with profile-appropriate `SO_RCVBUF`/`SO_SNDBUF` sizes,
-/// gracefully stepping down if restricted by mobile/container kernel caps.
+/// supporting dual-stack IPv6+IPv4 when bound to `[::]:port` (with transparent fallback to
+/// `0.0.0.0:port` on IPv4-only kernels) and gracefully stepping down buffer sizes if capped.
 fn bind_tuned_udp_socket(
     bind_addr: SocketAddr,
     buffer_ladder: &[usize],
-) -> io::Result<(std::net::UdpSocket, usize, usize)> {
-    let domain = Domain::for_address(bind_addr);
-    let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-    sock.set_nonblocking(true)?;
+) -> io::Result<(std::net::UdpSocket, usize, usize, bool, bool)> {
+    let tune_and_bind = |target: SocketAddr, dual_stack: bool| -> io::Result<(std::net::UdpSocket, usize, usize, bool, bool)> {
+        let domain = Domain::for_address(target);
+        let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+        sock.set_nonblocking(true)?;
+        let is_v6 = target.is_ipv6();
+        let mut is_dual_stack = false;
+        if is_v6 && dual_stack {
+            let _ = sock.set_only_v6(false);
+            is_dual_stack = sock.only_v6().map(|only| !only).unwrap_or(false);
+        }
 
-    for &size in buffer_ladder {
-        if sock.set_recv_buffer_size(size).is_ok() {
-            break;
+        for &size in buffer_ladder {
+            if sock.set_recv_buffer_size(size).is_ok() {
+                break;
+            }
+        }
+        for &size in buffer_ladder {
+            if sock.set_send_buffer_size(size).is_ok() {
+                break;
+            }
+        }
+
+        sock.bind(&target.into())?;
+        let actual_recv = sock.recv_buffer_size().unwrap_or(0);
+        let actual_send = sock.send_buffer_size().unwrap_or(0);
+        Ok((sock.into(), actual_recv, actual_send, is_v6, is_dual_stack))
+    };
+
+    if bind_addr.is_ipv6() && bind_addr.ip().is_unspecified() {
+        match tune_and_bind(bind_addr, true) {
+            Ok(bound) => return Ok(bound),
+            Err(err) => {
+                tracing::warn!(
+                    "Dual-stack IPv6 bind on {} failed ({}); falling back to IPv4 0.0.0.0:{}",
+                    bind_addr,
+                    err,
+                    bind_addr.port()
+                );
+                let v4_fallback =
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), bind_addr.port());
+                return tune_and_bind(v4_fallback, false);
+            }
         }
     }
-    for &size in buffer_ladder {
-        if sock.set_send_buffer_size(size).is_ok() {
-            break;
-        }
-    }
 
-    sock.bind(&bind_addr.into())?;
-    let actual_recv = sock.recv_buffer_size().unwrap_or(0);
-    let actual_send = sock.send_buffer_size().unwrap_or(0);
-    Ok((sock.into(), actual_recv, actual_send))
+    tune_and_bind(bind_addr, false)
 }
 
 const RFC5389_MAGIC_COOKIE: u32 = 0x2112_A442;
@@ -481,7 +567,11 @@ impl AsyncUdpSocket for MagicUdpSocket {
 
         let route = {
             let table = self.routes.read().expect("route table lock poisoned");
-            table.by_virtual.get(&dest).cloned()
+            table
+                .by_virtual
+                .get(&dest)
+                .or_else(|| table.by_virtual.get(&self.map_outbound_addr(dest)))
+                .cloned()
         };
         let Some(route) = route else {
             return Ok(());
@@ -506,6 +596,7 @@ impl AsyncUdpSocket for MagicUdpSocket {
         }
 
         if let Some(relay_addr) = route.relay_addr {
+            let mapped_relay = self.map_outbound_addr(relay_addr);
             for segment in transmit.contents.chunks(seg_size) {
                 let wrapped = SignalingMessage::RelayForward {
                     src_node_id: self.local_node_id,
@@ -514,7 +605,7 @@ impl AsyncUdpSocket for MagicUdpSocket {
                 }
                 .encode_datagram()
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-                self.io.try_send_to(&wrapped, relay_addr)?;
+                self.io.try_send_to(&wrapped, mapped_relay)?;
             }
         }
 
@@ -579,7 +670,7 @@ impl AsyncUdpSocket for MagicUdpSocket {
                 if m.len == 0 {
                     continue;
                 }
-
+                let canonical_addr = Self::canonicalize_inbound_addr(m.addr);
                 let is_rfc5389 = m.len == m.stride
                     && is_rfc5389_stun_response(&bufs[read_idx][..m.len]);
                 if is_rfc5389 {
@@ -587,7 +678,7 @@ impl AsyncUdpSocket for MagicUdpSocket {
                         parse_rfc5389_stun_response(&bufs[read_idx][..m.len])
                     {
                         let _ = self.signaling_tx.send((
-                            m.addr,
+                            canonical_addr,
                             SignalingMessage::StunResponse {
                                 tx_id,
                                 observed_addr,
@@ -618,7 +709,7 @@ impl AsyncUdpSocket for MagicUdpSocket {
                             }
                             let virt_addr = self.ensure_virtual_route(
                                 src_node_id,
-                                Some(m.addr),
+                                Some(canonical_addr),
                                 None,
                                 ConnectionType::Relayed,
                             );
@@ -633,7 +724,7 @@ impl AsyncUdpSocket for MagicUdpSocket {
                             write_idx += 1;
                         }
                         other => {
-                            let _ = self.signaling_tx.send((m.addr, other));
+                            let _ = self.signaling_tx.send((canonical_addr, other));
                         }
                     }
                     continue;
@@ -643,11 +734,11 @@ impl AsyncUdpSocket for MagicUdpSocket {
                     let table = self.routes.read().expect("route table lock poisoned");
                     table
                         .direct_to_virtual
-                        .get(&m.addr)
+                        .get(&canonical_addr)
                         .copied()
-                        .unwrap_or(m.addr)
+                        .unwrap_or_else(|| self.map_outbound_addr(canonical_addr))
                 } else {
-                    m.addr
+                    self.map_outbound_addr(canonical_addr)
                 };
 
                 if write_idx != read_idx {

@@ -67,6 +67,8 @@ jobs:
       - name: Generate flutter_rust_bridge bindings
         run: flutter_rust_bridge_codegen generate
       - name: Build Android Rust Libraries (16 KB page aligned)
+        env:
+          VELOCE_DEFAULT_RELAY: ${{ vars.VELOCE_DEFAULT_RELAY }}
         run: bash mobile/scripts/build-android-rust.sh release
       - name: Flutter Analyze & Test
         working-directory: mobile
@@ -81,19 +83,40 @@ jobs:
           VELOCE_KEY_ALIAS: ${{ secrets.VELOCE_KEY_ALIAS }}
           VELOCE_KEY_PASSWORD: ${{ secrets.VELOCE_KEY_PASSWORD }}
         run: |
-          if [ -n "${VELOCE_KEYSTORE_BASE64:-}" ]; then
-            echo "${VELOCE_KEYSTORE_BASE64}" | base64 --decode > /tmp/veloce-release.jks
+          MISSING=()
+          SET_COUNT=0
+          for var in VELOCE_KEYSTORE_BASE64 VELOCE_KEYSTORE_PASSWORD VELOCE_KEY_ALIAS VELOCE_KEY_PASSWORD; do
+            if [ -n "${!var:-}" ]; then
+              SET_COUNT=$((SET_COUNT + 1))
+            else
+              MISSING+=("$var")
+            fi
+          done
+
+          EXPECT_RELEASE_SIGNING=0
+          if [ "${SET_COUNT}" -eq 4 ]; then
+            printf '%s' "${VELOCE_KEYSTORE_BASE64}" | tr -d '\r\n ' | base64 --decode > /tmp/veloce-release.jks
             export VELOCE_KEYSTORE_PATH="/tmp/veloce-release.jks"
             trap 'rm -f /tmp/veloce-release.jks' EXIT
+            EXPECT_RELEASE_SIGNING=1
             echo "[veloce] Signing APK with configured release keystore"
+          elif [ "${SET_COUNT}" -gt 0 ]; then
+            echo "::error::Partial Android release signing secrets detected (${SET_COUNT}/4 set). Missing: ${MISSING[*]}. Refusing to silently fall back to an ephemeral debug keystore."
+            exit 1
           else
-            echo "[veloce] Release keystore secrets not set; signing preview APK with debug key"
+            echo "[veloce] No release keystore secrets configured; signing preview APK with debug key"
           fi
+
           flutter build apk --release
           APK="build/app/outputs/flutter-apk/app-release.apk"
           APKSIGNER="$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" -maxdepth 2 -name apksigner 2>/dev/null | sort -V | tail -n 1 || true)"
           if [ -n "${APKSIGNER}" ]; then
-            "${APKSIGNER}" verify --verbose --print-certs "${APK}"
+            CERT_OUTPUT="$("${APKSIGNER}" verify --verbose --print-certs "${APK}")"
+            echo "${CERT_OUTPUT}"
+            if [ "${EXPECT_RELEASE_SIGNING}" -eq 1 ] && echo "${CERT_OUTPUT}" | grep -qi "CN=Android Debug"; then
+              echo "::error::APK was signed with Android Debug key even though release keystore secrets were configured!"
+              exit 1
+            fi
           else
             jarsigner -verify -verbose "${APK}"
           fi
@@ -128,6 +151,8 @@ jobs:
       - name: Generate flutter_rust_bridge bindings
         run: flutter_rust_bridge_codegen generate
       - name: Build iOS Static Library & XCFramework
+        env:
+          VELOCE_DEFAULT_RELAY: ${{ vars.VELOCE_DEFAULT_RELAY }}
         run: bash mobile/scripts/build-ios-rust.sh
       - name: Flutter Analyze & Test
         working-directory: mobile

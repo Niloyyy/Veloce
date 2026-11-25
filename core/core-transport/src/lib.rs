@@ -4,10 +4,12 @@ pub mod error;
 pub mod identity;
 pub mod magic_socket;
 pub mod nat;
+pub mod port_map;
 pub mod transfer;
 
 pub use discovery::{
-    classify_interface_priority, local_lan_addrs, local_lan_addrs_with_overrides, DiscoveryEvent,
+    classify_interface_priority, local_addrs_with_options, local_lan_addrs,
+    local_lan_addrs_with_overrides, local_ticket_addrs_with_overrides, DiscoveryEvent,
     LanDiscovery, LocalPeer, MDNS_SERVICE_TYPE,
 };
 pub use endpoint::{
@@ -21,6 +23,7 @@ pub use identity::{
 };
 pub use magic_socket::{MagicUdpSocket, PathChangeEvent};
 pub use nat::{NatConnectPlan, NatCoordinator};
+pub use port_map::{try_map_udp_port, PortMapProtocol, PortMappingLease};
 pub use transfer::{
     run_receiver_session, run_receiver_session_with_profile, run_sender_session, TransferConfig,
     TransferDirection, TransferProgress, TransferSummary, DEFAULT_PARALLEL_STREAMS,
@@ -542,5 +545,112 @@ mod tests {
         sender.shutdown();
         receiver.shutdown();
         relay.shutdown();
+    }
+
+    #[tokio::test]
+    async fn dual_stack_ipv4_and_ipv6_transfers_on_single_socket() {
+        let mut s_opts = EndpointOptions {
+            device_name: "DualStackSender".into(),
+            enable_mdns: false,
+            parallel_streams: 4,
+            ..Default::default()
+        };
+        let mut r_opts = s_opts.clone();
+        r_opts.device_name = "DualStackReceiver".into();
+        // Default bind_addr is [::]:0 (dual-stack IPv6 + IPv4 with 0.0.0.0:0 fallback).
+        s_opts.override_lan_addrs.clear();
+
+        let (sender, _s_ch) = VeloceEndpoint::bind(s_opts).await.unwrap();
+        let (receiver, _r_ch) = VeloceEndpoint::bind(r_opts).await.unwrap();
+        let port = sender.listen_addr().port();
+
+        let src_dir = tempdir().unwrap();
+        let payload: Vec<u8> = (0..180_000u32).map(|i| ((i * 29) % 251) as u8).collect();
+        let file = src_dir.path().join("dual.bin");
+        fs::write(&file, &payload).unwrap();
+        let source = ChunkSource::from_paths_async(vec![file], Some(64 * 1024))
+            .await
+            .unwrap();
+        let hosted = sender.host_session(source, vec![], vec![]).unwrap();
+
+        // 1. Transfer over IPv4 loopback on the dual-stack socket.
+        if sender.magic_socket().supports_ipv4() && receiver.magic_socket().supports_ipv4() {
+            let dst_v4 = tempdir().unwrap();
+            let mut ticket_v4 = hosted.ticket.clone();
+            ticket_v4.direct_addrs = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)];
+            let sum_v4 = receiver
+                .join_session(&ticket_v4, dst_v4.path().to_path_buf(), Some(4))
+                .await
+                .unwrap();
+            assert_eq!(sum_v4.total_bytes, payload.len() as u64);
+            assert_eq!(fs::read(dst_v4.path().join("dual.bin")).unwrap(), payload);
+        }
+
+        // 2. Transfer over IPv6 loopback on the exact same dual-stack socket.
+        if sender.magic_socket().supports_ipv6() && receiver.magic_socket().supports_ipv6() {
+            let dst_v6 = tempdir().unwrap();
+            let mut ticket_v6 = hosted.ticket.clone();
+            ticket_v6.direct_addrs =
+                vec![SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), port)];
+            let sum_v6 = receiver
+                .join_session(&ticket_v6, dst_v6.path().to_path_buf(), Some(4))
+                .await
+                .unwrap();
+            assert_eq!(sum_v6.total_bytes, payload.len() as u64);
+            assert_eq!(fs::read(dst_v6.path().join("dual.bin")).unwrap(), payload);
+        }
+
+        sender.shutdown();
+        receiver.shutdown();
+    }
+
+    #[tokio::test]
+    async fn join_session_parallel_races_past_unreachable_candidates() {
+        let (sender, _s_ch) = VeloceEndpoint::bind(loopback_opts("RaceSender"))
+            .await
+            .unwrap();
+        let (receiver, _r_ch) = VeloceEndpoint::bind(loopback_opts("RaceReceiver"))
+            .await
+            .unwrap();
+
+        let src_dir = tempdir().unwrap();
+        let dst_dir = tempdir().unwrap();
+        let payload = vec![0xABu8; 96 * 1024];
+        let file = src_dir.path().join("race.bin");
+        fs::write(&file, &payload).unwrap();
+        let source = ChunkSource::from_paths_async(vec![file], Some(64 * 1024))
+            .await
+            .unwrap();
+
+        let hosted = sender
+            .host_session(source, vec![sender.listen_addr()], vec![])
+            .unwrap();
+
+        // Prepend RFC 5737 blackhole addresses before the real reachable address.
+        // Sequential dialing would stall 6s+ per dead address; parallel racing succeeds immediately.
+        let mut ticket = hosted.ticket.clone();
+        ticket.direct_addrs = vec![
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 9),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)), 9),
+            sender.listen_addr(),
+        ];
+
+        let started = std::time::Instant::now();
+        let summary = receiver
+            .join_session(&ticket, dst_dir.path().to_path_buf(), Some(4))
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(summary.total_bytes, payload.len() as u64);
+        assert_eq!(fs::read(dst_dir.path().join("race.bin")).unwrap(), payload);
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "parallel direct racing stalled for {:?}",
+            elapsed
+        );
+
+        sender.shutdown();
+        receiver.shutdown();
     }
 }

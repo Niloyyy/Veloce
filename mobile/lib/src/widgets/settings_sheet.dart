@@ -62,9 +62,12 @@ class _SettingsSheetState extends State<SettingsSheet> {
             TextField(
               controller: _relayController,
               decoration: const InputDecoration(
-                labelText: 'Relay Server (host:port)',
+                labelText: 'Relay Server (optional host:port)',
                 hintText: 'relay.example.com:7878',
-                helperText: 'Supports DNS hostnames or IP:port (comma-separated)',
+                helperText:
+                    'Optional: IPv6, UPnP/NAT-PMP, STUN & Tailscale work free out of the box. '
+                    'Add a self-hosted relay only for double-CGNAT IPv4-only cellular links.',
+                helperMaxLines: 3,
                 border: OutlineInputBorder(),
               ),
             ),

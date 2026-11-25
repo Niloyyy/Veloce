@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -235,7 +235,8 @@ impl VeloceEngine {
             Some(ref s) if !s.trim().is_empty() => s
                 .parse::<SocketAddr>()
                 .map_err(|e| FfiError::InvalidArgument(format!("invalid bind_addr '{s}': {e}")))?,
-            _ => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            // Prefer dual-stack [::]:0 (IPv6 + IPv4 on one port; MagicUdpSocket falls back to 0.0.0.0:0).
+            _ => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         };
 
         let mut relay_hosts = Vec::new();
@@ -244,6 +245,18 @@ impl VeloceEngine {
                 let trimmed = r.trim();
                 if !trimmed.is_empty() && !relay_hosts.iter().any(|h| h == trimmed) {
                     relay_hosts.push(trimmed.to_string());
+                }
+            }
+        }
+        // Optional build-time default relay (set via `VELOCE_DEFAULT_RELAY` env var at compile time)
+        // when no user relay is configured; empty by default for zero-cost standalone builds.
+        if relay_hosts.is_empty() {
+            if let Some(default_relays) = option_env!("VELOCE_DEFAULT_RELAY") {
+                for r in default_relays.split(',') {
+                    let trimmed = r.trim();
+                    if !trimmed.is_empty() && !relay_hosts.iter().any(|h| h == trimmed) {
+                        relay_hosts.push(trimmed.to_string());
+                    }
                 }
             }
         }

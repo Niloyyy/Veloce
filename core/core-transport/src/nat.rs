@@ -32,7 +32,7 @@ pub struct NatCoordinator {
     socket: Arc<MagicUdpSocket>,
     local_node_id: NodeId,
     relay_addrs: RwLock<Vec<SocketAddr>>,
-    public_addr: RwLock<Option<SocketAddr>>,
+    public_addrs: RwLock<Vec<SocketAddr>>,
     pending_stun: Mutex<HashMap<u64, oneshot::Sender<SocketAddr>>>,
     pending_lookups: Mutex<HashMap<NodeId, oneshot::Sender<LookupResult>>>,
     pending_punches: Mutex<HashMap<NodeId, Vec<oneshot::Sender<SocketAddr>>>>,
@@ -52,7 +52,7 @@ impl NatCoordinator {
             socket,
             local_node_id,
             relay_addrs: RwLock::new(initial_relays),
-            public_addr: RwLock::new(None),
+            public_addrs: RwLock::new(Vec::new()),
             pending_stun: Mutex::new(HashMap::new()),
             pending_lookups: Mutex::new(HashMap::new()),
             pending_punches: Mutex::new(HashMap::new()),
@@ -109,7 +109,33 @@ impl NatCoordinator {
     }
 
     pub fn public_addr(&self) -> Option<SocketAddr> {
-        *self.public_addr.read().expect("public_addr lock poisoned")
+        self.public_addrs
+            .read()
+            .expect("public_addrs lock poisoned")
+            .first()
+            .copied()
+    }
+
+    pub fn public_addrs(&self) -> Vec<SocketAddr> {
+        self.public_addrs
+            .read()
+            .expect("public_addrs lock poisoned")
+            .clone()
+    }
+
+    fn record_public_addr(&self, observed: SocketAddr) {
+        if observed.ip().is_unspecified() || observed.ip().is_loopback() {
+            return;
+        }
+        let mut addrs = self.public_addrs.write().expect("public_addrs lock poisoned");
+        if !addrs.contains(&observed) {
+            // Keep IPv4 first when present for broadest peer compatibility.
+            if observed.is_ipv4() {
+                addrs.insert(0, observed);
+            } else {
+                addrs.push(observed);
+            }
+        }
     }
 
     /// Discovers our reflexive public UDP address using STUN against the specified relay.
@@ -130,14 +156,50 @@ impl NatCoordinator {
             .map_err(|_| TransportError::Timeout("STUN discovery timed out".into()))?
             .map_err(|_| TransportError::NatTraversal("STUN waiter dropped".into()))?;
 
-        *self.public_addr.write().expect("public_addr lock poisoned") = Some(observed);
+        self.record_public_addr(observed);
         Ok(observed)
     }
 
     /// Queries standard RFC 5389 public STUN servers (`stun.cloudflare.com:3478`,
-    /// `stun.l.google.com:19302`) on the shared QUIC UDP socket so global tickets include
-    /// our reflexive public `IP:port` even when no `veloce-relay` server is configured.
+    /// `stun.l.google.com:19302`) on the shared QUIC UDP socket across both IPv4 and IPv6
+    /// (when dual-stack) so global tickets include reflexive public endpoints at $0 cost.
+    pub async fn discover_public_addrs_rfc5389(&self) -> Vec<SocketAddr> {
+        let mut discovered = Vec::new();
+        let v4_fut = async {
+            if self.socket.supports_ipv4() {
+                self.query_rfc5389_family(false).await
+            } else {
+                None
+            }
+        };
+        let v6_fut = async {
+            if self.socket.supports_ipv6() {
+                self.query_rfc5389_family(true).await
+            } else {
+                None
+            }
+        };
+
+        let (v4_obs, v6_obs) = tokio::join!(v4_fut, v6_fut);
+        if let Some(a) = v4_obs {
+            self.record_public_addr(a);
+            discovered.push(a);
+        }
+        if let Some(a) = v6_obs {
+            self.record_public_addr(a);
+            if !discovered.contains(&a) {
+                discovered.push(a);
+            }
+        }
+        discovered
+    }
+
+    /// Convenience wrapper returning the first RFC 5389 discovered public address.
     pub async fn discover_public_addr_rfc5389(&self) -> Option<SocketAddr> {
+        self.discover_public_addrs_rfc5389().await.into_iter().next()
+    }
+
+    async fn query_rfc5389_family(&self, want_ipv6: bool) -> Option<SocketAddr> {
         const PUBLIC_STUN_HOSTS: &[&str] = &[
             "stun.cloudflare.com:3478",
             "stun.l.google.com:19302",
@@ -150,7 +212,7 @@ impl NatCoordinator {
             else {
                 continue;
             };
-            let Some(stun_addr) = resolved.find(|a| a.is_ipv4()) else {
+            let Some(stun_addr) = resolved.find(|a| a.is_ipv6() == want_ipv6) else {
                 continue;
             };
 
@@ -174,7 +236,6 @@ impl NatCoordinator {
             if self.socket.send_raw_datagram(stun_addr, &pkt).await.is_ok() {
                 if let Ok(Ok(observed)) = tokio::time::timeout(Duration::from_millis(750), rx).await
                 {
-                    *self.public_addr.write().expect("public_addr lock poisoned") = Some(observed);
                     return Some(observed);
                 }
             }
@@ -385,7 +446,7 @@ impl NatCoordinator {
                 tx_id,
                 observed_addr,
             } => {
-                *self.public_addr.write().expect("public_addr lock poisoned") = Some(observed_addr);
+                self.record_public_addr(observed_addr);
                 if let Some(waiter) = self
                     .pending_stun
                     .lock()
@@ -396,7 +457,7 @@ impl NatCoordinator {
                 }
             }
             SignalingMessage::RelayRegistered { observed_addr, .. } => {
-                *self.public_addr.write().expect("public_addr lock poisoned") = Some(observed_addr);
+                self.record_public_addr(observed_addr);
             }
             SignalingMessage::PeerEndpoints {
                 target_node_id,

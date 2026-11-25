@@ -1,0 +1,19 @@
+services:
+  veloce-relay:
+    build:
+      context: ../..
+      dockerfile: deploy/relay/Dockerfile
+    container_name: veloce-relay
+    restart: unless-stopped
+    ports:
+      - "7878:7878/udp"
+    environment:
+      VELOCE_RELAY_BIND: "0.0.0.0:7878"
+      VELOCE_RELAY_MAX_PEERS: "10000"
+      VELOCE_RELAY_MAX_PEERS_PER_IP: "16"
+      VELOCE_RELAY_MAX_MBPS_PER_IP: "64"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

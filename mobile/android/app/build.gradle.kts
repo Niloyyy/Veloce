@@ -8,11 +8,24 @@ val releaseKeystorePath = System.getenv("VELOCE_KEYSTORE_PATH")
 val releaseKeystorePassword = System.getenv("VELOCE_KEYSTORE_PASSWORD")
 val releaseKeyAlias = System.getenv("VELOCE_KEY_ALIAS")
 val releaseKeyPassword = System.getenv("VELOCE_KEY_PASSWORD")
+val hasAnyReleaseSigningEnv = listOf(
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).any { !it.isNullOrBlank() }
 val hasReleaseKeystore = !releaseKeystorePath.isNullOrBlank() &&
     !releaseKeystorePassword.isNullOrBlank() &&
     !releaseKeyAlias.isNullOrBlank() &&
     !releaseKeyPassword.isNullOrBlank() &&
     file(releaseKeystorePath).exists()
+
+if (hasAnyReleaseSigningEnv && !hasReleaseKeystore) {
+    throw GradleException(
+        "Incomplete Android release signing configuration: ensure VELOCE_KEYSTORE_PATH (existing file), " +
+            "VELOCE_KEYSTORE_PASSWORD, VELOCE_KEY_ALIAS, and VELOCE_KEY_PASSWORD are all set."
+    )
+}
 
 android {
     namespace = "dev.veloce.p2p"

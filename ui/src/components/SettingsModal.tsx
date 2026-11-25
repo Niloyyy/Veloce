@@ -131,8 +131,9 @@ export function SettingsModal({
               placeholder="relay.example.com:7878, 203.0.113.10:7878"
             />
             <span className="field-hint">
-              Comma-separated DNS hostnames or IP:port hints for NAT traversal & blind E2EE relay
-              fallback. Saved locally in userData — no environment variables needed.
+              Optional comma-separated host:port hints. Native IPv6, UPnP/NAT-PMP, STUN, and
+              Tailscale/ZeroTier work free with no relay; add a self-hosted veloce-relay only when
+              both peers are on IPv4-only symmetric CGNAT.
             </span>
           </div>
 

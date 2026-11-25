@@ -215,22 +215,27 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * Queries active Wi-Fi, Ethernet, and Hotspot LAN IP addresses via ConnectivityManager
-     * (`allNetworks` so simultaneous cellular or VPN connections do not hide Wi-Fi) plus
-     * `NetworkInterface` fallback for Android Wi-Fi Hotspot interfaces (`ap0`, `wlan*`, `rndis*`).
+     * Queries active Wi-Fi, Ethernet, Hotspot, global Cellular IPv6, and mesh VPN (Tailscale/ZeroTier)
+     * IP addresses via ConnectivityManager (`allNetworks` so simultaneous cellular or VPN connections
+     * do not hide Wi-Fi) plus `NetworkInterface` fallback for Android Hotspot (`ap0`, `wlan*`, `rndis*`).
+     *
+     * Rust separates private LAN IPs (for mDNS) from global IPv6 and mesh VPN IPs (for global tickets).
      */
     private fun queryActiveWifiAddresses(): List<String> {
-        val results = mutableListOf<String>()
+        val lanIpv4s = mutableListOf<String>()
+        val globalIpv6s = mutableListOf<String>()
+        val vpnAddrs = mutableListOf<String>()
         val cm = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE)
             as? ConnectivityManager
 
         if (cm != null) {
             for (network in cm.allNetworks) {
                 val caps = cm.getNetworkCapabilities(network) ?: continue
-                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+                val isVpn = caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
                 val isLanTransport = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
                     caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-                if (!isLanTransport) continue
+                val isCellular = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                if (!isLanTransport && !isCellular && !isVpn) continue
 
                 val linkProps = cm.getLinkProperties(network) ?: continue
                 for (linkAddr in linkProps.linkAddresses) {
@@ -239,14 +244,27 @@ class MainActivity : FlutterActivity() {
                         continue
                     }
                     val host = addr.hostAddress?.substringBefore('%') ?: continue
-                    if (addr is Inet4Address) {
-                        results.add(0, host)
-                    } else if (addr is Inet6Address) {
-                        results.add(host)
+                    when {
+                        isVpn -> vpnAddrs.add(host)
+                        isLanTransport && addr is Inet4Address -> lanIpv4s.add(host)
+                        addr is Inet6Address -> {
+                            // Include global unicast IPv6 (2000::/3) across Wi-Fi & 4G/5G cellular
+                            // so devices bypass IPv4 CGNAT with direct P2P IPv6 at $0 cost.
+                            val firstByte = addr.address[0].toInt() and 0xFF
+                            val isUniqueLocal = (firstByte and 0xFE) == 0xFC
+                            if (!isUniqueLocal || isLanTransport) {
+                                globalIpv6s.add(host)
+                            }
+                        }
                     }
                 }
             }
         }
+
+        val results = mutableListOf<String>()
+        results.addAll(lanIpv4s)
+        results.addAll(globalIpv6s)
+        results.addAll(vpnAddrs)
 
         // Fallback for Android Wi-Fi Hotspot / tethering interfaces (ap0, swlan0, wlan1, rndis0)
         // which may not appear as a client network in ConnectivityManager.allNetworks.
