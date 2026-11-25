@@ -1,4 +1,4 @@
-/// Helpers for resolving and formatting human-readable Android & iOS hardware model names.
+// Helpers for resolving and formatting human-readable Android & iOS hardware model names.
 
 const Set<String> _legacyDefaultNames = {
   'veloce android',

@@ -159,6 +159,29 @@ class RecordingPlatformService extends VelocePlatformService {
         .map((p) => '$base/${p.split('/').last}')
         .toList(growable: false);
   }
+
+  @override
+  Future<List<ExportedFileEntry>> exportToPublicDownloadsWithUris(
+    List<String> sourcePaths, {
+    String? customTreeUri,
+    String? customDisplayPath,
+    String? stagingRoot,
+  }) async {
+    final paths = await exportToPublicDownloads(
+      sourcePaths,
+      customTreeUri: customTreeUri,
+      customDisplayPath: customDisplayPath,
+      stagingRoot: stagingRoot,
+    );
+    return paths
+        .map(
+          (p) => ExportedFileEntry(
+            displayPath: p,
+            openUri: 'content://veloce.test/${p.split('/').last}',
+          ),
+        )
+        .toList(growable: false);
+  }
 }
 
 void main() {
