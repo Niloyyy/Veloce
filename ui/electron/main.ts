@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { detectHardwareModelName } from "./deviceName";
 
 interface NativeClient {
   nodeInfoJson(): string;
@@ -67,11 +68,18 @@ export interface DesktopSettings {
   theme: DesktopThemeId;
 }
 
+interface PersistedDesktopSettings extends DesktopSettings {
+  deviceNameCustom?: boolean;
+}
+
+const DETECTED_DEVICE_NAME = detectHardwareModelName();
+
 let mainWindow: BrowserWindow | null = null;
 let nativeAddon: NativeAddon | null = null;
 let client: NativeClient | null = null;
 let initError: string | null = null;
 let currentSettings: DesktopSettings = defaultSettings();
+let deviceNameCustom = false;
 
 function defaultSettings(): DesktopSettings {
   const envRelays = (process.env.VELOCE_RELAY_ADDRS || "")
@@ -80,7 +88,7 @@ function defaultSettings(): DesktopSettings {
     .filter(Boolean);
 
   return {
-    deviceName: os.hostname() || "Veloce Desktop",
+    deviceName: DETECTED_DEVICE_NAME,
     downloadDir: path.join(os.homedir(), "Downloads", "Veloce"),
     relayAddrs: envRelays,
     parallelStreams: 8,
@@ -131,11 +139,31 @@ function loadPersistedSettings(): DesktopSettings {
   try {
     const file = settingsFilePath();
     if (!fs.existsSync(file)) {
+      deviceNameCustom = false;
       return fallback;
     }
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<DesktopSettings>;
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<PersistedDesktopSettings>;
+    const rawSavedName = typeof parsed.deviceName === "string" ? parsed.deviceName.trim() : "";
+    const host = (os.hostname() || "").trim();
+    const looksLikeLegacyAutoName =
+      !rawSavedName ||
+      rawSavedName.toLowerCase() === "veloce desktop" ||
+      (parsed.deviceNameCustom === undefined &&
+        host.length > 0 &&
+        rawSavedName.toLowerCase() === host.toLowerCase());
+
+    if (parsed.deviceNameCustom === true) {
+      deviceNameCustom = true;
+    } else if (looksLikeLegacyAutoName) {
+      deviceNameCustom = false;
+      parsed.deviceName = fallback.deviceName;
+    } else {
+      deviceNameCustom = rawSavedName !== DETECTED_DEVICE_NAME;
+    }
+
     return sanitizeSettings(parsed, fallback);
   } catch {
+    deviceNameCustom = false;
     return fallback;
   }
 }
@@ -145,7 +173,11 @@ function savePersistedSettings(next: DesktopSettings): void {
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true });
   const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(next, null, 2), "utf8");
+  const payload: PersistedDesktopSettings = {
+    ...next,
+    deviceNameCustom,
+  };
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
   fs.renameSync(tmp, file);
 }
 
@@ -169,6 +201,7 @@ function buildStatusPayload() {
       error: initError ?? "Engine initializing",
       nodeInfo: null,
       defaultOutputDir: currentSettings.downloadDir,
+      detectedDeviceName: DETECTED_DEVICE_NAME,
       settings: currentSettings,
     };
   }
@@ -177,6 +210,7 @@ function buildStatusPayload() {
     error: null,
     nodeInfo: JSON.parse(client.nodeInfoJson()),
     defaultOutputDir: currentSettings.downloadDir,
+    detectedDeviceName: DETECTED_DEVICE_NAME,
     settings: currentSettings,
   };
 }
@@ -287,6 +321,9 @@ function registerIpcHandlers(): void {
         JSON.stringify(next.relayAddrs) !== JSON.stringify(prev.relayAddrs);
 
       currentSettings = next;
+      if (typeof partial.deviceName === "string") {
+        deviceNameCustom = next.deviceName !== DETECTED_DEVICE_NAME;
+      }
       try {
         savePersistedSettings(next);
       } catch (err) {

@@ -2,6 +2,7 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   Palette,
+  Pencil,
   Shield,
   SlidersHorizontal,
   Trash2,
@@ -83,7 +84,7 @@ export function App() {
   const [theme, setTheme] = useState<ThemeId>("dark");
   const [status, setStatus] = useState<EngineStatus | null>(null);
   const [settings, setSettings] = useState<DesktopSettings>({
-    deviceName: "Veloce Desktop",
+    deviceName: "",
     downloadDir: "",
     relayAddrs: [],
     parallelStreams: 8,
@@ -523,11 +524,17 @@ export function App() {
 
         <div className="topbar-right">
           {status?.nodeInfo && (
-            <div className="node-chip" title={`Full Node ID: ${status.nodeInfo.nodeId}`}>
+            <button
+              type="button"
+              className="node-chip node-chip-btn"
+              title={`Click to rename device • Node ID: ${status.nodeInfo.nodeId}`}
+              onClick={() => setSettingsOpen(true)}
+            >
               <Shield size={13} />
               <span>{status.nodeInfo.deviceName}</span>
               <code>{status.nodeInfo.shortId}</code>
-            </div>
+              <Pencil size={11} className="node-chip-edit" />
+            </button>
           )}
           <button
             className="icon-btn"
@@ -667,6 +674,7 @@ export function App() {
       {settingsOpen && (
         <SettingsModal
           settings={settings}
+          detectedDeviceName={status?.detectedDeviceName}
           saving={savingSettings}
           onBrowseDownloadDir={async () => (await window.veloce?.pickOutputDir()) ?? null}
           onSave={handleSaveSettings}

@@ -2,10 +2,12 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:veloce_mobile/src/models/veloce_models.dart';
 import 'package:veloce_mobile/src/services/platform_service.dart';
 import 'package:veloce_mobile/src/state/veloce_controller.dart';
 import 'package:veloce_mobile/src/theme/veloce_themes.dart';
+import 'package:veloce_mobile/src/utils/device_name.dart';
 import 'package:veloce_mobile/src/utils/formatters.dart';
 import 'package:veloce_mobile/src/widgets/connection_badge.dart';
 import 'package:veloce_mobile/src/widgets/settings_sheet.dart';
@@ -122,6 +124,10 @@ class RecordingPlatformService extends VelocePlatformService {
   final List<String?> exportedTreeUris = [];
   final List<String> releasedUris = [];
   PickedSaveFolder? nextPickedFolder;
+  String? detectedDeviceName;
+
+  @override
+  Future<String?> getDetectedDeviceName() async => detectedDeviceName;
 
   @override
   Future<PickedSaveFolder?> pickCustomSaveFolder() async => nextPickedFolder;
@@ -461,5 +467,87 @@ void main() {
 
     expect(find.text('1.8s'), findsOneWidget);
     expect(find.text('Took 2.4s'), findsOneWidget);
+  });
+
+  test('device name helpers map Apple/Android models and detect legacy placeholders', () {
+    expect(mapAppleModelIdentifier('iPhone16,2'), 'iPhone 15 Pro Max');
+    expect(mapAppleModelIdentifier('iPhone17,1'), 'iPhone 16 Pro');
+    expect(mapAppleModelIdentifier('iPad16,3'), 'iPad Pro 11-inch (M4)');
+    expect(mapAppleModelIdentifier('iPhone99,1'), 'iPhone');
+    expect(formatManufacturerModel('google', 'Pixel 8 Pro'), 'Pixel 8 Pro');
+    expect(formatManufacturerModel('samsung', 'SM-S928B'), 'Samsung SM-S928B');
+    expect(formatManufacturerModel('OnePlus', 'OnePlus 12'), 'OnePlus 12');
+    expect(isLegacyDefaultDeviceName('Veloce Android'), isTrue);
+    expect(isLegacyDefaultDeviceName('Veloce iPhone'), isTrue);
+    expect(isLegacyDefaultDeviceName('Galaxy S24 Ultra'), isFalse);
+  });
+
+  testWidgets('SettingsSheet edits custom device name and resets to detected model',
+      (tester) async {
+    VeloceSettings? saved;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SettingsSheet(
+            settings: const VeloceSettings(
+              deviceName: 'Pixel 8 Pro',
+              relayHost: '',
+              exportToDownloads: true,
+            ),
+            detectedDeviceName: 'Pixel 8 Pro',
+            onSave: (next) => saved = next,
+          ),
+        ),
+      ),
+    );
+
+    final nameField = find.widgetWithText(TextField, 'Device Name');
+    await tester.enterText(nameField, 'Neel Phone');
+    await tester.pumpAndSettle();
+
+    // Reset button appears once edited away from detected model.
+    expect(find.byTooltip('Reset to Pixel 8 Pro'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('Save & Apply'));
+    await tester.tap(find.text('Save & Apply'));
+    await tester.pumpAndSettle();
+    expect(saved?.deviceName, 'Neel Phone');
+  });
+
+  test('VeloceController migrates legacy default device name to detected hardware model',
+      () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    SharedPreferences.setMockInitialValues({
+      'veloce.deviceName': 'Veloce Android',
+    });
+    final fake = FakeRustBridge();
+    final platform = RecordingPlatformService()
+      ..detectedDeviceName = 'Galaxy S24 Ultra';
+    final ctrl = VeloceController(
+      bridge: fake,
+      platformService: platform,
+      enableWakelock: false,
+    );
+
+    await ctrl.initialize();
+    expect(ctrl.detectedDeviceName, 'Galaxy S24 Ultra');
+    expect(ctrl.settings.deviceName, 'Galaxy S24 Ultra');
+    expect(ctrl.nodeInfo?.deviceName, 'Galaxy S24 Ultra');
+
+    // Editing to a custom name persists and stays respected across restarts.
+    await ctrl.updateSettings(ctrl.settings.copyWith(deviceName: 'Neel S24'));
+    expect(ctrl.settings.deviceName, 'Neel S24');
+    expect(ctrl.nodeInfo?.deviceName, 'Neel S24');
+
+    ctrl.dispose();
+
+    final ctrl2 = VeloceController(
+      bridge: FakeRustBridge(),
+      platformService: platform,
+      enableWakelock: false,
+    );
+    await ctrl2.initialize();
+    expect(ctrl2.settings.deviceName, 'Neel S24');
+    ctrl2.dispose();
   });
 }

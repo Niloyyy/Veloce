@@ -1,4 +1,9 @@
+import 'dart:io';
+
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/services.dart';
+
+import '../utils/device_name.dart';
 
 /// Selected custom destination folder returned by Android SAF (`content://...`) or OS folder picker.
 class PickedSaveFolder {
@@ -76,6 +81,57 @@ class VelocePlatformService {
     } on PlatformException {
       return const [];
     }
+  }
+
+  /// Detects the actual human-readable Android or iOS device/model name
+  /// (e.g. "Galaxy S24 Ultra", "Pixel 8 Pro", "iPhone 16 Pro", "iPad Air 11-inch (M2)").
+  Future<String?> getDetectedDeviceName() async {
+    try {
+      final nativeName = await _channel.invokeMethod<String>('getDeviceModelName');
+      if (nativeName != null && nativeName.trim().isNotEmpty) {
+        return nativeName.trim();
+      }
+    } on MissingPluginException {
+      // Fall through to device_info_plus on iOS or desktop hosts.
+    } on PlatformException {
+      // Fall through to device_info_plus.
+    }
+
+    try {
+      final plugin = DeviceInfoPlugin();
+      if (Platform.isIOS) {
+        final ios = await plugin.iosInfo;
+        var machine = ios.utsname.machine.trim();
+        if (machine == 'x86_64' || machine == 'arm64') {
+          final simModel = Platform.environment['SIMULATOR_MODEL_IDENTIFIER']?.trim() ?? '';
+          if (simModel.isNotEmpty) {
+            machine = simModel;
+          }
+        }
+        final mapped = mapAppleModelIdentifier(machine);
+        if (mapped.isNotEmpty) {
+          return mapped;
+        }
+        final userAssigned = ios.name.trim();
+        if (userAssigned.isNotEmpty &&
+            !const {'iphone', 'ipad', 'ipod touch', 'iphone simulator'}
+                .contains(userAssigned.toLowerCase())) {
+          return userAssigned;
+        }
+        final model = ios.model.trim();
+        return model.isNotEmpty ? model : 'iPhone';
+      }
+      if (Platform.isAndroid) {
+        final android = await plugin.androidInfo;
+        final formatted = formatManufacturerModel(android.manufacturer, android.model);
+        if (formatted.isNotEmpty) {
+          return formatted;
+        }
+      }
+    } catch (_) {
+      // Safe fallback in headless/test environments.
+    }
+    return null;
   }
 
   /// Opens Android's native Storage Access Framework (SAF) folder picker

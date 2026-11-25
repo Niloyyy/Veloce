@@ -94,7 +94,21 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
           debugShowCheckedModeBanner: false,
           theme: buildVeloceTheme(activeTheme),
           home: Builder(
-            builder: (innerCtx) => Scaffold(
+            builder: (innerCtx) {
+              void openSettings() {
+                showModalBottomSheet<void>(
+                  context: innerCtx,
+                  isScrollControlled: true,
+                  builder: (_) => SettingsSheet(
+                    settings: _controller.settings,
+                    detectedDeviceName: _controller.detectedDeviceName,
+                    onSave: _controller.updateSettings,
+                    onPickSaveFolder: _controller.pickSaveFolderOnly,
+                  ),
+                );
+              }
+
+              return Scaffold(
               appBar: AppBar(
                 title: Row(
                   mainAxisSize: MainAxisSize.min,
@@ -102,17 +116,37 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
                     const VeloceLogoMark(size: 30),
                     const SizedBox(width: 10),
                     Flexible(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('Veloce', style: TextStyle(fontWeight: FontWeight.w700)),
-                          if (_controller.nodeInfo != null)
-                            Text(
-                              '${_controller.nodeInfo!.deviceName} • ${_controller.nodeInfo!.shortId}',
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(innerCtx).textTheme.labelSmall,
-                            ),
-                        ],
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(8),
+                        onTap: openSettings,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 2),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('Veloce', style: TextStyle(fontWeight: FontWeight.w700)),
+                              if (_controller.nodeInfo != null)
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Flexible(
+                                      child: Text(
+                                        '${_controller.nodeInfo!.deviceName} • ${_controller.nodeInfo!.shortId}',
+                                        overflow: TextOverflow.ellipsis,
+                                        style: Theme.of(innerCtx).textTheme.labelSmall,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Icon(
+                                      Icons.edit_outlined,
+                                      size: 12,
+                                      color: Theme.of(innerCtx).colorScheme.onSurfaceVariant,
+                                    ),
+                                  ],
+                                ),
+                            ],
+                          ),
+                        ),
                       ),
                     ),
                   ],
@@ -126,17 +160,7 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
                   IconButton(
                     tooltip: 'Settings',
                     icon: const Icon(Icons.tune_rounded),
-                    onPressed: () {
-                      showModalBottomSheet<void>(
-                        context: innerCtx,
-                        isScrollControlled: true,
-                        builder: (_) => SettingsSheet(
-                          settings: _controller.settings,
-                          onSave: _controller.updateSettings,
-                          onPickSaveFolder: _controller.pickSaveFolderOnly,
-                        ),
-                      );
-                    },
+                    onPressed: openSettings,
                   ),
                 ],
               ),
@@ -202,7 +226,8 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
                   ),
                 ],
               ),
-            ),
+            );
+            },
           ),
         );
       },

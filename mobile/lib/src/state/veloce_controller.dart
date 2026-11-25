@@ -11,6 +11,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../models/veloce_models.dart';
 import '../services/platform_service.dart';
 import '../theme/veloce_themes.dart';
+import '../utils/device_name.dart';
 
 enum TransferStatus { active, paused, completed, failed, cancelled }
 
@@ -219,6 +220,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   final bool enableWakelock;
 
   static const _prefDeviceName = 'veloce.deviceName';
+  static const _prefDeviceNameCustom = 'veloce.deviceNameCustom';
   static const _prefRelayHost = 'veloce.relayHost';
   static const _prefExportDownloads = 'veloce.exportDownloads';
   static const _prefThemeDark = 'veloce.themeDark';
@@ -228,12 +230,13 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   static const _prefHistory = 'veloce.transferHistory';
 
   VeloceSettings _settings = VeloceSettings(
-    deviceName: Platform.isIOS ? 'Veloce iPhone' : 'Veloce Mobile',
+    deviceName: Platform.isIOS ? 'iPhone' : 'Android Device',
     relayHost: '',
     exportToDownloads: true,
     themeId: VeloceThemeId.obsidian,
   );
 
+  String _detectedDeviceName = '';
   AppNodeInfo? _nodeInfo;
   String? _initError;
   String? _actionError;
@@ -253,6 +256,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   VeloceSettings get settings => _settings;
+  String get detectedDeviceName => _detectedDeviceName;
   AppNodeInfo? get nodeInfo => _nodeInfo;
   String? get initError => _initError;
   String? get actionError => _actionError;
@@ -304,15 +308,27 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _loadSettingsAndHistory() async {
+    final fallbackModel = Platform.isIOS ? 'iPhone' : 'Android Device';
+    final detectedRaw = await _platform.getDetectedDeviceName();
+    final detected = (detectedRaw != null && detectedRaw.trim().isNotEmpty)
+        ? detectedRaw.trim()
+        : fallbackModel;
+    _detectedDeviceName = detected;
+
     try {
       final prefs = await SharedPreferences.getInstance();
-      final defaultName = Platform.isIOS ? 'Veloce iPhone' : 'Veloce Android';
+      final savedName = prefs.getString(_prefDeviceName)?.trim() ?? '';
+      final isCustomName = prefs.getBool(_prefDeviceNameCustom) ?? false;
+      final resolvedDeviceName =
+          (!isCustomName && isLegacyDefaultDeviceName(savedName))
+              ? detected
+              : (savedName.isNotEmpty ? savedName : detected);
       final savedThemeId = VeloceThemeId.parse(
         prefs.getString(_prefThemeId),
         fallbackDark: prefs.getBool(_prefThemeDark) ?? true,
       );
       _settings = VeloceSettings(
-        deviceName: prefs.getString(_prefDeviceName) ?? defaultName,
+        deviceName: resolvedDeviceName,
         relayHost: prefs.getString(_prefRelayHost) ?? '',
         exportToDownloads: prefs.getBool(_prefExportDownloads) ?? true,
         themeId: savedThemeId,
@@ -335,7 +351,8 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
         }
       }
     } catch (_) {
-      // Keep default settings in tests or restricted environments.
+      // Keep detected device name even when SharedPreferences is unavailable in tests.
+      _settings = _settings.copyWith(deviceName: detected);
     }
   }
 
@@ -482,11 +499,21 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> updateSettings(VeloceSettings next) async {
+    final trimmedName = next.deviceName.trim();
+    final rawSafeName = trimmedName.isNotEmpty
+        ? trimmedName
+        : (_detectedDeviceName.isNotEmpty
+            ? _detectedDeviceName
+            : _settings.deviceName);
+    final safeName =
+        rawSafeName.length > 64 ? rawSafeName.substring(0, 64) : rawSafeName;
+    final sanitizedNext = next.copyWith(deviceName: safeName);
+
     final prevUri = _settings.customSaveUri.trim();
-    final nextUri = next.customSaveUri.trim();
-    final needsRestart = next.deviceName != _settings.deviceName ||
-        next.relayHost != _settings.relayHost ||
-        next.exportToDownloads != _settings.exportToDownloads ||
+    final nextUri = sanitizedNext.customSaveUri.trim();
+    final needsRestart = sanitizedNext.deviceName != _settings.deviceName ||
+        sanitizedNext.relayHost != _settings.relayHost ||
+        sanitizedNext.exportToDownloads != _settings.exportToDownloads ||
         (!Platform.isAndroid &&
             prevUri != nextUri &&
             !prevUri.startsWith('content://') &&
@@ -496,18 +523,21 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
       unawaited(_platform.releaseCustomSaveFolder(prevUri));
     }
 
-    _settings = next;
-    notifyListeners();
+    _settings = sanitizedNext;
+    _safeNotifyListeners();
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_prefDeviceName, next.deviceName);
-      await prefs.setString(_prefRelayHost, next.relayHost);
-      await prefs.setBool(_prefExportDownloads, next.exportToDownloads);
-      await prefs.setBool(_prefThemeDark, next.effectiveThemeId.isDark);
-      await prefs.setString(_prefThemeId, next.effectiveThemeId.name);
-      await prefs.setString(_prefCustomSaveUri, next.customSaveUri);
-      await prefs.setString(_prefCustomSaveLabel, next.customSaveLabel);
+      final isCustom = _detectedDeviceName.isEmpty ||
+          sanitizedNext.deviceName != _detectedDeviceName;
+      await prefs.setString(_prefDeviceName, sanitizedNext.deviceName);
+      await prefs.setBool(_prefDeviceNameCustom, isCustom);
+      await prefs.setString(_prefRelayHost, sanitizedNext.relayHost);
+      await prefs.setBool(_prefExportDownloads, sanitizedNext.exportToDownloads);
+      await prefs.setBool(_prefThemeDark, sanitizedNext.effectiveThemeId.isDark);
+      await prefs.setString(_prefThemeId, sanitizedNext.effectiveThemeId.name);
+      await prefs.setString(_prefCustomSaveUri, sanitizedNext.customSaveUri);
+      await prefs.setString(_prefCustomSaveLabel, sanitizedNext.customSaveLabel);
     } catch (_) {
       // Ignore persistence errors in tests.
     }

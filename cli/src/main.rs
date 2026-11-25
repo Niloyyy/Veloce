@@ -33,10 +33,226 @@ enum Command {
     Help,
 }
 
+fn is_generic_hardware_name(raw: &str) -> bool {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return true;
+    }
+    matches!(
+        lower.as_str(),
+        "none"
+            | "n/a"
+            | "na"
+            | "unknown"
+            | "invalid"
+            | "empty"
+            | "default string"
+            | "system product name"
+            | "system manufacturer"
+            | "system version"
+            | "to be filled by o.e.m."
+            | "to be filled by o.e.m"
+            | "o.e.m."
+            | "oem"
+            | "not specified"
+            | "not applicable"
+            | "sku"
+            | "0"
+            | "1.0"
+            | "standard pc"
+            | "virtualbox"
+            | "vmware virtual platform"
+            | "qemu"
+            | "bochs"
+            | "kvm"
+    ) || lower.contains("to be filled by")
+        || lower.contains("default string")
+        || lower.contains("system product")
+        || lower.starts_with("standard pc (")
+}
+
+fn clean_vendor(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if is_generic_hardware_name(trimmed) {
+        return String::new();
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "asustek computer inc." | "asustek computer inc" | "asus" => "ASUS".into(),
+        "dell inc." | "dell computer corporation" | "dell" => "Dell".into(),
+        "hewlett-packard" | "hp inc." | "hp" => "HP".into(),
+        "lenovo" => "Lenovo".into(),
+        "micro-star international co., ltd." | "micro-star international co., ltd" | "msi" => {
+            "MSI".into()
+        }
+        "acer" | "acer inc." => "Acer".into(),
+        "apple inc." | "apple" => "Apple".into(),
+        "gigabyte technology co., ltd." | "gigabyte" => "Gigabyte".into(),
+        "asrock" => "ASRock".into(),
+        "framework" => "Framework".into(),
+        "microsoft corporation" => "Microsoft".into(),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn format_hardware_model(vendor_raw: &str, model_raw: &str) -> Option<String> {
+    let model = model_raw.trim_matches(['\0', ' ', '\t', '\r', '\n']);
+    if is_generic_hardware_name(model) {
+        return None;
+    }
+    let vendor = clean_vendor(vendor_raw);
+    let combined = if vendor.is_empty() {
+        model.to_string()
+    } else {
+        let lower_model = model.to_ascii_lowercase();
+        let lower_vendor = vendor.to_ascii_lowercase();
+        if lower_model.starts_with(&lower_vendor)
+            || (lower_vendor == "apple"
+                && (lower_model.starts_with("mac") || lower_model.starts_with("imac")))
+            || (lower_vendor == "microsoft" && lower_model.starts_with("surface"))
+            || (lower_vendor == "lenovo"
+                && (lower_model.starts_with("thinkpad")
+                    || lower_model.starts_with("ideapad")
+                    || lower_model.starts_with("legion")
+                    || lower_model.starts_with("yoga")))
+        {
+            model.to_string()
+        } else {
+            format!("{vendor} {model}")
+        }
+    };
+    Some(combined.chars().take(64).collect())
+}
+
+fn detect_hardware_model_name() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let read_trimmed = |p: &str| {
+            std::fs::read_to_string(p)
+                .ok()
+                .map(|s| s.trim_matches(['\0', ' ', '\t', '\r', '\n']).to_string())
+                .unwrap_or_default()
+        };
+        let vendor = read_trimmed("/sys/devices/virtual/dmi/id/sys_vendor");
+        let product_name = read_trimmed("/sys/devices/virtual/dmi/id/product_name");
+        let product_version = read_trimmed("/sys/devices/virtual/dmi/id/product_version");
+        let product_family = read_trimmed("/sys/devices/virtual/dmi/id/product_family");
+        let board_name = read_trimmed("/sys/devices/virtual/dmi/id/board_name");
+
+        let is_lenovo = clean_vendor(&vendor).eq_ignore_ascii_case("lenovo");
+        let candidates: [&str; 4] = if is_lenovo {
+            [&product_version, &product_family, &product_name, &board_name]
+        } else {
+            [&product_name, &board_name, &product_family, &product_version]
+        };
+        for candidate in candidates {
+            if let Some(formatted) = format_hardware_model(&vendor, candidate) {
+                return Some(formatted);
+            }
+        }
+        let dt_model = read_trimmed("/proc/device-tree/model");
+        if !is_generic_hardware_name(&dt_model) {
+            return Some(dt_model.chars().take(64).collect());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("sysctl")
+            .args(["-n", "hw.model"])
+            .output()
+        {
+            if out.status.success() {
+                let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let mapped = if id.starts_with("MacBookPro") {
+                    "MacBook Pro"
+                } else if id.starts_with("MacBookAir") {
+                    "MacBook Air"
+                } else if id.starts_with("MacBook") {
+                    "MacBook"
+                } else if id.starts_with("Macmini") {
+                    "Mac mini"
+                } else if id.starts_with("MacStudio") {
+                    "Mac Studio"
+                } else if id.starts_with("MacPro") {
+                    "Mac Pro"
+                } else if id.starts_with("iMac") {
+                    "iMac"
+                } else if id.starts_with("Mac") {
+                    "Mac"
+                } else {
+                    id.as_str()
+                };
+                if let Some(formatted) = format_hardware_model("Apple", mapped) {
+                    return Some(formatted);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let query_reg = |value: &str| -> String {
+            let Ok(out) = std::process::Command::new("reg")
+                .args([
+                    "query",
+                    r"HKLM\HARDWARE\DESCRIPTION\System\BIOS",
+                    "/v",
+                    value,
+                ])
+                .output()
+            else {
+                return String::new();
+            };
+            if !out.status.success() {
+                return String::new();
+            }
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                if let Some(idx) = line.find("REG_") {
+                    let rest = &line[idx..];
+                    if let Some(ws) = rest.find(char::is_whitespace) {
+                        return rest[ws..].trim().to_string();
+                    }
+                }
+            }
+            String::new()
+        };
+        let vendor = query_reg("SystemManufacturer");
+        let product = query_reg("SystemProductName");
+        let family = query_reg("SystemFamily");
+        let board = query_reg("BaseBoardProduct");
+        let is_lenovo = clean_vendor(&vendor).eq_ignore_ascii_case("lenovo");
+        let candidates: [&str; 3] = if is_lenovo {
+            [&family, &product, &board]
+        } else {
+            [&product, &family, &board]
+        };
+        for candidate in candidates {
+            if let Some(formatted) = format_hardware_model(&vendor, candidate) {
+                return Some(formatted);
+            }
+        }
+    }
+
+    None
+}
+
 fn default_device_name() -> String {
+    if let Some(model) = detect_hardware_model_name() {
+        return model;
+    }
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
-        .unwrap_or_else(|_| "Veloce CLI".into())
+        .ok()
+        .map(|s| s.trim().trim_end_matches(".local").to_string())
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("localhost"))
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("localhost"))
+        })
+        .unwrap_or_else(|| "Veloce CLI".into())
 }
 
 fn parse_cli<I>(args: I) -> Result<Command, String>
@@ -616,5 +832,33 @@ mod tests {
 
         assert!(parse_cli(["send"].into_iter().map(String::from)).is_err());
         assert!(parse_cli(["receive"].into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn hardware_model_formatting_filters_placeholders_and_deduplicates_vendor() {
+        assert_eq!(
+            format_hardware_model("ASRock", "Z690 Pro RS").as_deref(),
+            Some("ASRock Z690 Pro RS")
+        );
+        assert_eq!(
+            format_hardware_model("Dell Inc.", "XPS 15 9530").as_deref(),
+            Some("Dell XPS 15 9530")
+        );
+        assert_eq!(
+            format_hardware_model("LENOVO", "ThinkPad X1 Carbon Gen 11").as_deref(),
+            Some("ThinkPad X1 Carbon Gen 11")
+        );
+        assert_eq!(
+            format_hardware_model("Hewlett-Packard", "HP EliteBook 840 G10").as_deref(),
+            Some("HP EliteBook 840 G10")
+        );
+        assert_eq!(
+            format_hardware_model("ASUSTeK COMPUTER INC.", "To Be Filled By O.E.M."),
+            None
+        );
+        assert_eq!(
+            format_hardware_model("System manufacturer", "System Product Name"),
+            None
+        );
     }
 }

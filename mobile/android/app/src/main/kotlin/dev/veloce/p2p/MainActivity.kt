@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.provider.Settings
 import android.webkit.MimeTypeMap
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -58,6 +59,9 @@ class MainActivity : FlutterActivity() {
                     "getLocalWifiAddresses" -> {
                         result.success(queryActiveWifiAddresses())
                     }
+                    "getDeviceModelName" -> {
+                        result.success(resolveDeviceModelName())
+                    }
                     "pickCustomSaveFolder" -> {
                         launchCustomFolderPicker(result)
                     }
@@ -84,6 +88,90 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun resolveDeviceModelName(): String {
+        val resolver = applicationContext.contentResolver
+        val genericNames = setOf(
+            "android",
+            "localhost",
+            "unknown",
+            "generic",
+            "device",
+            "phone",
+            "mobile",
+            "veloce android",
+            "veloce mobile",
+        )
+
+        fun isUsefulName(raw: String?): Boolean {
+            val cleaned = raw?.trim() ?: return false
+            if (cleaned.isEmpty()) return false
+            val lower = cleaned.lowercase()
+            if (lower in genericNames) return false
+            if (lower.startsWith("sdk_gphone") || lower.startsWith("generic_")) return false
+            return true
+        }
+
+        // 1. Prefer Android's user/OEM friendly device name (e.g., "Galaxy S24 Ultra", "Pixel 8 Pro",
+        //    "Redmi Note 13 Pro", or whatever custom name the user gave their phone in Android Settings).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) {
+            try {
+                val globalName = Settings.Global.getString(resolver, Settings.Global.DEVICE_NAME)
+                if (isUsefulName(globalName)) {
+                    return globalName.trim().take(64)
+                }
+            } catch (_: Exception) {
+                // Ignore restricted OEM builds.
+            }
+        }
+
+        // 2. Fallback to Bluetooth/marketing device name setting when readable without extra permissions.
+        try {
+            val btName = Settings.Secure.getString(resolver, "bluetooth_name")
+            if (isUsefulName(btName)) {
+                return btName.trim().take(64)
+            }
+        } catch (_: Exception) {
+            // Ignore restricted settings on newer Android releases.
+        }
+
+        // 3. Fallback to Build.MANUFACTURER + Build.MODEL cleanly formatted.
+        val rawManufacturer = Build.MANUFACTURER?.trim().orEmpty()
+        val rawModel = Build.MODEL?.trim().orEmpty()
+        val manufacturer = when (rawManufacturer.lowercase()) {
+            "samsung" -> "Samsung"
+            "google" -> "Google"
+            "xiaomi" -> "Xiaomi"
+            "redmi" -> "Redmi"
+            "poco" -> "POCO"
+            "oneplus" -> "OnePlus"
+            "oppo" -> "OPPO"
+            "vivo" -> "vivo"
+            "realme" -> "realme"
+            "motorola" -> "Motorola"
+            "nothing" -> "Nothing"
+            "sony" -> "Sony"
+            "asus" -> "ASUS"
+            "huawei" -> "HUAWEI"
+            "honor" -> "HONOR"
+            "lenovo" -> "Lenovo"
+            "nokia", "hmd global" -> "Nokia"
+            else -> rawManufacturer.replaceFirstChar { ch ->
+                if (ch.isLowerCase()) ch.titlecase() else ch.toString()
+            }
+        }
+
+        val combined = when {
+            rawModel.isEmpty() -> manufacturer
+            manufacturer.isEmpty() -> rawModel
+            rawModel.lowercase().startsWith(manufacturer.lowercase()) -> rawModel
+            rawModel.lowercase().startsWith("pixel ") && manufacturer.equals("Google", ignoreCase = true) ->
+                rawModel
+            else -> "$manufacturer $rawModel"
+        }.trim()
+
+        return if (combined.isNotEmpty()) combined.take(64) else "Android Device"
     }
 
     private fun launchCustomFolderPicker(result: MethodChannel.Result) {

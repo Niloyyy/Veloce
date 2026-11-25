@@ -1,10 +1,11 @@
-import { FolderOpen, SlidersHorizontal, X } from "lucide-react";
+import { FolderOpen, RotateCcw, SlidersHorizontal, X } from "lucide-react";
 import { useState } from "react";
 import type { DesktopSettings, ThemeId } from "../types/veloce";
 import { THEME_OPTIONS } from "../utils/themes";
 
 interface SettingsModalProps {
   settings: DesktopSettings;
+  detectedDeviceName?: string;
   saving: boolean;
   onBrowseDownloadDir: () => Promise<string | null>;
   onSave: (next: DesktopSettings) => Promise<void>;
@@ -13,6 +14,7 @@ interface SettingsModalProps {
 
 export function SettingsModal({
   settings,
+  detectedDeviceName,
   saving,
   onBrowseDownloadDir,
   onSave,
@@ -86,9 +88,23 @@ export function SettingsModal({
 
         <form className="settings-form" onSubmit={handleSubmit}>
           <div className="field-group">
-            <label className="input-label" htmlFor="veloce-device-name">
-              Device Name
-            </label>
+            <div className="field-label-row">
+              <label className="input-label" htmlFor="veloce-device-name">
+                Device Name
+              </label>
+              {detectedDeviceName && deviceName.trim() !== detectedDeviceName && (
+                <button
+                  type="button"
+                  className="btn-link-reset"
+                  onClick={() => setDeviceName(detectedDeviceName)}
+                  disabled={saving}
+                  title={`Reset to detected model (${detectedDeviceName})`}
+                >
+                  <RotateCcw size={12} />
+                  <span>Reset to model</span>
+                </button>
+              )}
+            </div>
             <input
               id="veloce-device-name"
               className="text-input"
@@ -96,8 +112,13 @@ export function SettingsModal({
               maxLength={64}
               value={deviceName}
               onChange={(e) => setDeviceName(e.target.value)}
-              placeholder="Advertised over mDNS and TLS handshake"
+              placeholder={detectedDeviceName || "Advertised over mDNS and TLS handshake"}
             />
+            {detectedDeviceName && (
+              <span className="field-hint">
+                Shown to nearby peers &amp; transfer offers • Detected model: {detectedDeviceName}
+              </span>
+            )}
           </div>
 
           <div className="field-group">

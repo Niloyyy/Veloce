@@ -22,6 +22,7 @@ export interface EngineStatus {
   error: string | null;
   nodeInfo: NodeInfo | null;
   defaultOutputDir?: string;
+  detectedDeviceName?: string;
   settings?: DesktopSettings;
 }
 

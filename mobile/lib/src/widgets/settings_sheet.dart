@@ -10,11 +10,13 @@ class SettingsSheet extends StatefulWidget {
     required this.settings,
     required this.onSave,
     this.onPickSaveFolder,
+    this.detectedDeviceName = '',
   });
 
   final VeloceSettings settings;
   final ValueChanged<VeloceSettings> onSave;
   final Future<PickedSaveFolder?> Function()? onPickSaveFolder;
+  final String detectedDeviceName;
 
   @override
   State<SettingsSheet> createState() => _SettingsSheetState();
@@ -89,10 +91,30 @@ class _SettingsSheetState extends State<SettingsSheet> {
             const SizedBox(height: 16),
             TextField(
               controller: _nameController,
-              decoration: const InputDecoration(
+              maxLength: 64,
+              onChanged: (_) => setState(() {}),
+              decoration: InputDecoration(
                 labelText: 'Device Name',
-                hintText: 'Advertised via mDNS and handshake',
-                border: OutlineInputBorder(),
+                hintText: widget.detectedDeviceName.isNotEmpty
+                    ? widget.detectedDeviceName
+                    : 'Shown to nearby peers',
+                helperText: widget.detectedDeviceName.isNotEmpty
+                    ? 'Visible to peers • Detected model: ${widget.detectedDeviceName}'
+                    : 'Visible to nearby peers during discovery and transfers',
+                border: const OutlineInputBorder(),
+                counterText: '',
+                suffixIcon: widget.detectedDeviceName.isNotEmpty &&
+                        _nameController.text.trim() != widget.detectedDeviceName
+                    ? IconButton(
+                        tooltip: 'Reset to ${widget.detectedDeviceName}',
+                        icon: const Icon(Icons.restart_alt_rounded, size: 20),
+                        onPressed: () {
+                          setState(() {
+                            _nameController.text = widget.detectedDeviceName;
+                          });
+                        },
+                      )
+                    : null,
               ),
             ),
             const SizedBox(height: 14),
