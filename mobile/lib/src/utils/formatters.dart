@@ -36,3 +36,18 @@ String formatEta(double seconds) {
   if (mins > 0) return '${mins}m ${secs}s';
   return '${secs}s';
 }
+
+/// Formats elapsed transfer duration (measured from when chunks started transferring).
+String formatDurationMs(int ms) {
+  if (ms <= 0) return '—';
+  if (ms < 1000) return '${ms}ms';
+  final totalSeconds = ms / 1000.0;
+  if (totalSeconds < 10) return '${totalSeconds.toStringAsFixed(1)}s';
+  final rounded = totalSeconds.round();
+  final hours = rounded ~/ 3600;
+  final mins = (rounded % 3600) ~/ 60;
+  final secs = rounded % 60;
+  if (hours > 0) return '${hours}h ${mins}m ${secs}s';
+  if (mins > 0) return '${mins}m ${secs}s';
+  return '${secs}s';
+}

@@ -121,6 +121,7 @@ class MobileEngineEvent_TransferProgress extends MobileEngineEvent {
     required this.totalChunks,
     required this.speedBytesPerSec,
     required this.etaSeconds,
+    required this.elapsedMs,
     required this.connectionType,
   });
 
@@ -132,6 +133,7 @@ class MobileEngineEvent_TransferProgress extends MobileEngineEvent {
   final int totalChunks;
   final double speedBytesPerSec;
   final double etaSeconds;
+  final BigInt elapsedMs;
   final String connectionType;
 }
 

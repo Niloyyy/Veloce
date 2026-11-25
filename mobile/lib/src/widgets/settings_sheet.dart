@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../services/platform_service.dart';
 import '../state/veloce_controller.dart';
+import '../theme/veloce_themes.dart';
 
 class SettingsSheet extends StatefulWidget {
   const SettingsSheet({
@@ -23,7 +24,7 @@ class _SettingsSheetState extends State<SettingsSheet> {
   late final TextEditingController _nameController;
   late final TextEditingController _relayController;
   late bool _exportToDownloads;
-  late ThemeMode _themeMode;
+  late VeloceThemeId _themeId;
   late String _customSaveUri;
   late String _customSaveLabel;
   bool _pickingFolder = false;
@@ -34,7 +35,7 @@ class _SettingsSheetState extends State<SettingsSheet> {
     _nameController = TextEditingController(text: widget.settings.deviceName);
     _relayController = TextEditingController(text: widget.settings.relayHost);
     _exportToDownloads = widget.settings.exportToDownloads;
-    _themeMode = widget.settings.themeMode;
+    _themeId = widget.settings.effectiveThemeId;
     _customSaveUri = widget.settings.customSaveUri;
     _customSaveLabel = widget.settings.customSaveLabel;
   }
@@ -177,14 +178,42 @@ class _SettingsSheetState extends State<SettingsSheet> {
               value: _exportToDownloads,
               onChanged: (v) => setState(() => _exportToDownloads = v),
             ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Dark Mode'),
-              value: _themeMode == ThemeMode.dark,
-              onChanged: (dark) =>
-                  setState(() => _themeMode = dark ? ThemeMode.dark : ThemeMode.light),
+            const SizedBox(height: 8),
+            Text('Appearance Theme', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: VeloceThemeId.values.map((theme) {
+                final selected = _themeId == theme;
+                return ChoiceChip(
+                  selected: selected,
+                  showCheckmark: false,
+                  avatar: Container(
+                    width: 18,
+                    height: 18,
+                    decoration: BoxDecoration(
+                      color: theme.scaffoldColor,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: theme.accentColor, width: 2.5),
+                    ),
+                    child: Center(
+                      child: Container(
+                        width: 6,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          color: theme.accentColor,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                    ),
+                  ),
+                  label: Text(theme.label),
+                  onSelected: (_) => setState(() => _themeId = theme),
+                );
+              }).toList(growable: false),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 16),
             SizedBox(
               width: double.infinity,
               child: FilledButton(
@@ -195,7 +224,7 @@ class _SettingsSheetState extends State<SettingsSheet> {
                       deviceName: name.isEmpty ? widget.settings.deviceName : name,
                       relayHost: _relayController.text.trim(),
                       exportToDownloads: _exportToDownloads,
-                      themeMode: _themeMode,
+                      themeId: _themeId,
                       customSaveUri: _customSaveUri,
                       customSaveLabel: _customSaveLabel,
                     ),

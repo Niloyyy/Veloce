@@ -5,6 +5,7 @@ import 'src/screens/send_tab.dart';
 import 'src/screens/transfers_tab.dart';
 import 'src/services/frb_rust_bridge.dart';
 import 'src/state/veloce_controller.dart';
+import 'src/theme/veloce_themes.dart';
 import 'src/widgets/incoming_offer_sheet.dart';
 import 'src/widgets/settings_sheet.dart';
 import 'src/widgets/veloce_logo.dart';
@@ -87,23 +88,11 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
     return ListenableBuilder(
       listenable: _controller,
       builder: (context, _) {
-        const seed = Color(0xFF3B82F6);
+        final activeTheme = _controller.settings.effectiveThemeId;
         return MaterialApp(
           title: 'Veloce',
           debugShowCheckedModeBanner: false,
-          themeMode: _controller.settings.themeMode,
-          theme: ThemeData(
-            useMaterial3: true,
-            colorScheme: ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.light),
-          ),
-          darkTheme: ThemeData(
-            useMaterial3: true,
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: seed,
-              brightness: Brightness.dark,
-              surface: const Color(0xFF0C0F14),
-            ),
-          ),
+          theme: buildVeloceTheme(activeTheme),
           home: Builder(
             builder: (innerCtx) => Scaffold(
               appBar: AppBar(
@@ -130,13 +119,9 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
                 ),
                 actions: [
                   IconButton(
-                    tooltip: 'Toggle theme',
-                    icon: Icon(
-                      _controller.settings.themeMode == ThemeMode.dark
-                          ? Icons.light_mode_outlined
-                          : Icons.dark_mode_outlined,
-                    ),
-                    onPressed: _controller.toggleTheme,
+                    tooltip: 'Theme: ${activeTheme.label} (tap to switch)',
+                    icon: const Icon(Icons.palette_outlined),
+                    onPressed: _controller.cycleTheme,
                   ),
                   IconButton(
                     tooltip: 'Settings',

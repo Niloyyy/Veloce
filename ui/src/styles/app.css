@@ -31,6 +31,70 @@
   --radius: 12px;
 }
 
+[data-theme="midnight"] {
+  --bg: #000000;
+  --surface: #0b0e14;
+  --surface-elevated: #121722;
+  --border: #1e2636;
+  --text: #f1f5f9;
+  --text-muted: #8b9bb4;
+  --accent: #38bdf8;
+  --accent-hover: #0ea5e9;
+  --lan: #10b981;
+  --p2p: #38bdf8;
+  --relayed: #f59e0b;
+  --danger: #ef4444;
+  --radius: 12px;
+}
+
+[data-theme="nord"] {
+  --bg: #1b222c;
+  --surface: #232c39;
+  --surface-elevated: #2b3646;
+  --border: #38465a;
+  --text: #eceff4;
+  --text-muted: #9aa7ba;
+  --accent: #5eead4;
+  --accent-hover: #2dd4bf;
+  --lan: #34d399;
+  --p2p: #38bdf8;
+  --relayed: #fbbf24;
+  --danger: #f87171;
+  --radius: 12px;
+}
+
+[data-theme="emerald"] {
+  --bg: #09130f;
+  --surface: #102019;
+  --surface-elevated: #162b22;
+  --border: #234235;
+  --text: #ecfdf5;
+  --text-muted: #8cb2a1;
+  --accent: #10b981;
+  --accent-hover: #059669;
+  --lan: #34d399;
+  --p2p: #38bdf8;
+  --relayed: #f59e0b;
+  --danger: #f87171;
+  --radius: 12px;
+}
+
+[data-theme="sunset"] {
+  --bg: #140e12;
+  --surface: #1f161c;
+  --surface-elevated: #2a1d26;
+  --border: #402c39;
+  --text: #fdf2f8;
+  --text-muted: #b89aa9;
+  --accent: #f97316;
+  --accent-hover: #ea580c;
+  --lan: #10b981;
+  --p2p: #fb7185;
+  --relayed: #fbbf24;
+  --danger: #ef4444;
+  --radius: 12px;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -832,4 +896,58 @@ p {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.duration-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.theme-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.theme-swatch-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-elevated);
+  color: var(--text);
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.theme-swatch-btn:hover {
+  border-color: var(--accent);
+}
+
+.theme-swatch-btn.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.theme-swatch-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 2px solid;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.theme-swatch-dot span {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
 }

@@ -1,4 +1,5 @@
 export type ConnectionType = "LAN" | "Direct-P2P" | "Relayed";
+export type ThemeId = "dark" | "light" | "midnight" | "nord" | "emerald" | "sunset";
 
 export interface NodeInfo {
   nodeId: string;
@@ -13,7 +14,7 @@ export interface DesktopSettings {
   downloadDir: string;
   relayAddrs: string[];
   parallelStreams: number;
-  theme: "dark" | "light";
+  theme: ThemeId;
 }
 
 export interface EngineStatus {
@@ -93,6 +94,7 @@ export type EngineEvent =
       totalChunks: number;
       speedBytesPerSec: number;
       etaSeconds: number;
+      elapsedMs: number;
       connectionType: ConnectionType;
     }
   | {
@@ -149,6 +151,7 @@ export interface TransferRecord {
   speedBytesPerSec: number;
   speedHistory: number[];
   etaSeconds: number;
+  elapsedMs?: number;
   connectionType: ConnectionType;
   error?: string;
   outputPaths?: string[];

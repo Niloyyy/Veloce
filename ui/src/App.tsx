@@ -1,10 +1,9 @@
 import {
   ArrowDownLeft,
   ArrowUpRight,
-  Moon,
+  Palette,
   Shield,
   SlidersHorizontal,
-  Sun,
   Trash2,
   X,
 } from "lucide-react";
@@ -22,11 +21,12 @@ import type {
   IncomingOfferEvent,
   PeerDto,
   StartSessionResult,
+  ThemeId,
   TransferRecord,
 } from "./types/veloce";
+import { nextThemeId, themeLabel } from "./utils/themes";
 
 type ActiveTab = "send" | "receive";
-type ThemeMode = "dark" | "light";
 
 const HISTORY_STORAGE_KEY = "veloce.desktopTransferHistory";
 
@@ -80,7 +80,7 @@ function persistHistory(records: Record<string, TransferRecord>): void {
 
 export function App() {
   const [tab, setTab] = useState<ActiveTab>("send");
-  const [theme, setTheme] = useState<ThemeMode>("dark");
+  const [theme, setTheme] = useState<ThemeId>("dark");
   const [status, setStatus] = useState<EngineStatus | null>(null);
   const [settings, setSettings] = useState<DesktopSettings>({
     deviceName: "Veloce Desktop",
@@ -191,6 +191,7 @@ export function App() {
               speedBytesPerSec: evt.speedBytesPerSec,
               speedHistory: history,
               etaSeconds: evt.etaSeconds,
+              elapsedMs: evt.elapsedMs > 0 ? evt.elapsedMs : existing?.elapsedMs,
               connectionType: evt.connectionType,
             },
           };
@@ -249,6 +250,7 @@ export function App() {
                 evt.averageSpeedBytesPerSec,
               ].slice(-24),
               etaSeconds: 0,
+              elapsedMs: evt.elapsedMs > 0 ? evt.elapsedMs : existing?.elapsedMs,
               connectionType: existing?.connectionType ?? "LAN",
               outputPaths: evt.outputPaths,
             },
@@ -376,7 +378,7 @@ export function App() {
   };
 
   const handleToggleTheme = () => {
-    const nextTheme: ThemeMode = theme === "dark" ? "light" : "dark";
+    const nextTheme: ThemeId = nextThemeId(theme);
     setTheme(nextTheme);
     setSettings((prev) => ({ ...prev, theme: nextTheme }));
     void window.veloce?.updateSettings({ theme: nextTheme });
@@ -389,6 +391,7 @@ export function App() {
     try {
       const result = await window.veloce.updateSettings(next);
       setSettings(result.settings);
+      setTheme(result.settings.theme);
       setStatus(result.status);
       setOutputDir(result.settings.downloadDir);
       setActiveSession(null);
@@ -529,11 +532,11 @@ export function App() {
           <button
             className="icon-btn"
             type="button"
-            aria-label="Toggle dark or light theme"
-            title="Toggle theme"
+            aria-label={`Switch theme (current: ${themeLabel(theme)})`}
+            title={`Theme: ${themeLabel(theme)} (click to switch)`}
             onClick={handleToggleTheme}
           >
-            {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+            <Palette size={16} />
           </button>
           <button
             className="icon-btn"

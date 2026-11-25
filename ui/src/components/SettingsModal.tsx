@@ -1,6 +1,7 @@
 import { FolderOpen, SlidersHorizontal, X } from "lucide-react";
 import { useState } from "react";
-import type { DesktopSettings } from "../types/veloce";
+import type { DesktopSettings, ThemeId } from "../types/veloce";
+import { THEME_OPTIONS } from "../utils/themes";
 
 interface SettingsModalProps {
   settings: DesktopSettings;
@@ -21,6 +22,7 @@ export function SettingsModal({
   const [downloadDir, setDownloadDir] = useState(settings.downloadDir);
   const [relayText, setRelayText] = useState(settings.relayAddrs.join(", "));
   const [parallelStreams, setParallelStreams] = useState(settings.parallelStreams);
+  const [selectedTheme, setSelectedTheme] = useState<ThemeId>(settings.theme);
   const [error, setError] = useState<string | null>(null);
 
   const handleBrowse = async () => {
@@ -47,7 +49,7 @@ export function SettingsModal({
         downloadDir: downloadDir.trim() || settings.downloadDir,
         relayAddrs,
         parallelStreams,
-        theme: settings.theme,
+        theme: selectedTheme,
       });
       onClose();
     } catch (err) {
@@ -157,6 +159,31 @@ export function SettingsModal({
             <span className="field-hint">
               Recommended: 8 for desktop LAN/WAN, 4 for low-power links, 16–32 for high-BDP fiber.
             </span>
+          </div>
+
+          <div className="field-group">
+            <span className="input-label">Appearance Theme</span>
+            <div className="theme-picker-grid">
+              {THEME_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  className={`theme-swatch-btn ${selectedTheme === opt.id ? "active" : ""}`}
+                  onClick={() => setSelectedTheme(opt.id)}
+                >
+                  <span
+                    className="theme-swatch-dot"
+                    style={{
+                      backgroundColor: opt.bg,
+                      borderColor: opt.accent,
+                    }}
+                  >
+                    <span style={{ backgroundColor: opt.accent }} />
+                  </span>
+                  <span>{opt.label}</span>
+                </button>
+              ))}
+            </div>
           </div>
 
           {error && <div className="inline-error">{error}</div>}

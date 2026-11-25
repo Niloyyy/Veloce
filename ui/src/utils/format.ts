@@ -27,3 +27,17 @@ export function formatEta(seconds: number): string {
   if (mins > 0) return `${mins}m ${secs}s`;
   return `${secs}s`;
 }
+
+export function formatDurationMs(ms: number | undefined): string {
+  if (!ms || !Number.isFinite(ms) || ms <= 0) return "—";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const totalSeconds = ms / 1000;
+  if (totalSeconds < 10) return `${totalSeconds.toFixed(1)}s`;
+  const rounded = Math.round(totalSeconds);
+  const hrs = Math.floor(rounded / 3600);
+  const mins = Math.floor((rounded % 3600) / 60);
+  const secs = rounded % 60;
+  if (hrs > 0) return `${hrs}h ${mins}m ${secs}s`;
+  if (mins > 0) return `${mins}m ${secs}s`;
+  return `${secs}s`;
+}

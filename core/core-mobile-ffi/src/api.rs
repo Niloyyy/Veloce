@@ -190,6 +190,7 @@ pub enum MobileEngineEvent {
         total_chunks: u32,
         speed_bytes_per_sec: f64,
         eta_seconds: f64,
+        elapsed_ms: u64,
         connection_type: String,
     },
     PeerDiscovered {
@@ -249,6 +250,7 @@ impl From<EngineEvent> for MobileEngineEvent {
                 total_chunks,
                 speed_bytes_per_sec,
                 eta_seconds,
+                elapsed_ms,
                 connection_type,
             } => Self::TransferProgress {
                 transfer_id,
@@ -259,6 +261,7 @@ impl From<EngineEvent> for MobileEngineEvent {
                 total_chunks,
                 speed_bytes_per_sec,
                 eta_seconds,
+                elapsed_ms,
                 connection_type,
             },
             EngineEvent::PeerDiscovered { peer } => Self::PeerDiscovered {

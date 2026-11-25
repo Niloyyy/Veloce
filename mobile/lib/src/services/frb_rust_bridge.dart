@@ -164,6 +164,7 @@ class FrbVeloceBridge implements VeloceRustBridge {
         :final totalChunks,
         :final speedBytesPerSec,
         :final etaSeconds,
+        :final elapsedMs,
         :final connectionType,
       ) =>
         AppEventTransferProgress(
@@ -175,6 +176,7 @@ class FrbVeloceBridge implements VeloceRustBridge {
           totalChunks: totalChunks,
           speedBytesPerSec: speedBytesPerSec,
           etaSeconds: etaSeconds,
+          elapsedMs: elapsedMs.toInt(),
           connectionType: connectionType,
         ),
       frb.MobileEngineEvent_PeerDiscovered(:final peer) => AppEventPeerDiscovered(

@@ -120,6 +120,7 @@ class AppEventTransferProgress extends AppEngineEvent {
     required this.totalChunks,
     required this.speedBytesPerSec,
     required this.etaSeconds,
+    this.elapsedMs = 0,
     required this.connectionType,
   });
 
@@ -131,6 +132,7 @@ class AppEventTransferProgress extends AppEngineEvent {
   final int totalChunks;
   final double speedBytesPerSec;
   final double etaSeconds;
+  final int elapsedMs;
   final String connectionType;
 }
 

@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:veloce_mobile/src/models/veloce_models.dart';
 import 'package:veloce_mobile/src/services/platform_service.dart';
 import 'package:veloce_mobile/src/state/veloce_controller.dart';
+import 'package:veloce_mobile/src/theme/veloce_themes.dart';
 import 'package:veloce_mobile/src/utils/formatters.dart';
 import 'package:veloce_mobile/src/widgets/connection_badge.dart';
 import 'package:veloce_mobile/src/widgets/settings_sheet.dart';
@@ -149,11 +150,14 @@ class RecordingPlatformService extends VelocePlatformService {
 }
 
 void main() {
-  test('formatters produce human-readable byte, speed, and ETA strings', () {
+  test('formatters produce human-readable byte, speed, ETA, and elapsed duration strings', () {
     expect(formatBytes(0), '0 B');
     expect(formatBytes(1024 * 1024), '1.00 MB');
     expect(formatSpeed(10 * 1024 * 1024), '10.0 MB/s');
     expect(formatEta(75), '1m 15s');
+    expect(formatDurationMs(420), '420ms');
+    expect(formatDurationMs(3460), '3.5s');
+    expect(formatDurationMs(75000), '1m 15s');
   });
 
   testWidgets('ConnectionBadge renders LAN, Direct P2P (UDP), and Relayed labels',
@@ -386,10 +390,76 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Downloads/MyProjects'), findsOneWidget);
 
+    await tester.ensureVisible(find.text('Nord Frost'));
+    await tester.tap(find.text('Nord Frost'));
+    await tester.pumpAndSettle();
+
     await tester.ensureVisible(find.text('Save & Apply'));
     await tester.tap(find.text('Save & Apply'));
     await tester.pumpAndSettle();
     expect(saved?.customSaveUri, 'content://tree/custom');
     expect(saved?.customSaveLabel, 'Downloads/MyProjects');
+    expect(saved?.effectiveThemeId, VeloceThemeId.nord);
+  });
+
+  testWidgets('TransferCard displays chunk elapsed time while active and Took duration when done',
+      (tester) async {
+    const activeItem = TransferItem(
+      transferId: 'act1',
+      label: 'archive.tar',
+      direction: 'send',
+      status: TransferStatus.active,
+      bytesTransferred: 512 * 1024,
+      totalBytes: 1024 * 1024,
+      chunksVerified: 2,
+      totalChunks: 4,
+      speedBytesPerSec: 12 * 1024 * 1024,
+      etaSeconds: 1,
+      elapsedMs: 1800,
+      connectionType: 'LAN',
+    );
+    const doneItem = TransferItem(
+      transferId: 'done1',
+      label: 'archive.tar',
+      direction: 'send',
+      status: TransferStatus.completed,
+      bytesTransferred: 1024 * 1024,
+      totalBytes: 1024 * 1024,
+      chunksVerified: 4,
+      totalChunks: 4,
+      speedBytesPerSec: 12 * 1024 * 1024,
+      etaSeconds: 0,
+      elapsedMs: 2400,
+      connectionType: 'LAN',
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildVeloceTheme(VeloceThemeId.midnight),
+        home: Scaffold(
+          body: Column(
+            children: [
+              TransferCard(
+                item: activeItem,
+                onPause: () {},
+                onResume: () {},
+                onCancel: () {},
+                onRemove: () {},
+              ),
+              TransferCard(
+                item: doneItem,
+                onPause: () {},
+                onResume: () {},
+                onCancel: () {},
+                onRemove: () {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('1.8s'), findsOneWidget);
+    expect(find.text('Took 2.4s'), findsOneWidget);
   });
 }

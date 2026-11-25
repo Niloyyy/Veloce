@@ -149,6 +149,7 @@ pub enum EngineEvent {
         total_chunks: u32,
         speed_bytes_per_sec: f64,
         eta_seconds: f64,
+        elapsed_ms: u64,
         connection_type: String,
     },
     #[serde(rename_all = "camelCase")]
@@ -321,6 +322,7 @@ impl VeloceEngine {
                             total_chunks: p.total_chunks,
                             speed_bytes_per_sec: p.speed_bytes_per_sec,
                             eta_seconds: p.eta_seconds,
+                            elapsed_ms: p.elapsed_ms,
                             connection_type: p.connection_type.as_str().into(),
                         });
                     }
@@ -383,8 +385,8 @@ impl VeloceEngine {
                                     direction: direction_str(direction).into(),
                                     total_bytes: summary.total_bytes,
                                     total_chunks: summary.total_chunks,
-                                    elapsed_ms: summary.elapsed_ms,
-                                    average_speed_bytes_per_sec: summary.average_speed_bytes_per_sec,
+                                    elapsed_ms: summary.data_elapsed_ms,
+                                    average_speed_bytes_per_sec: summary.steady_state_speed_bytes_per_sec,
                                     output_paths: summary
                                         .finalized_paths
                                         .into_iter()
@@ -622,8 +624,8 @@ impl VeloceEngine {
                                 direction: "send".into(),
                                 total_bytes: summary.total_bytes,
                                 total_chunks: summary.total_chunks,
-                                elapsed_ms: summary.elapsed_ms,
-                                average_speed_bytes_per_sec: summary.average_speed_bytes_per_sec,
+                                elapsed_ms: summary.data_elapsed_ms,
+                                average_speed_bytes_per_sec: summary.steady_state_speed_bytes_per_sec,
                                 output_paths: Vec::new(),
                             });
                         }
@@ -713,8 +715,8 @@ impl VeloceEngine {
                         direction: "receive".into(),
                         total_bytes: summary.total_bytes,
                         total_chunks: summary.total_chunks,
-                        elapsed_ms: summary.elapsed_ms,
-                        average_speed_bytes_per_sec: summary.average_speed_bytes_per_sec,
+                        elapsed_ms: summary.data_elapsed_ms,
+                        average_speed_bytes_per_sec: summary.steady_state_speed_bytes_per_sec,
                         output_paths: summary
                             .finalized_paths
                             .into_iter()

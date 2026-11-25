@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use core_protocol::{
@@ -51,6 +51,8 @@ pub struct TransferProgress {
     pub total_chunks: u32,
     pub speed_bytes_per_sec: f64,
     pub eta_seconds: f64,
+    /// Elapsed milliseconds measured from when the first chunk started being sent/received.
+    pub elapsed_ms: u64,
     pub connection_type: ConnectionType,
 }
 
@@ -160,6 +162,8 @@ pub async fn run_sender_session(
     }
 
     let start = Instant::now();
+    // Latched the exact moment the first chunk starts being read/sent over data streams.
+    let first_chunk_start: Arc<OnceLock<Instant>> = Arc::new(OnceLock::new());
     let bytes_sent = Arc::new(AtomicU64::new(0));
     let chunks_sent = Arc::new(AtomicU32::new(0));
 
@@ -170,6 +174,7 @@ pub async fn run_sender_session(
     let serve_source = Arc::clone(&source);
     let serve_bytes = Arc::clone(&bytes_sent);
     let serve_chunks = Arc::clone(&chunks_sent);
+    let serve_first_chunk = Arc::clone(&first_chunk_start);
     let serve_progress = progress_tx.clone();
     let serve_id = transfer_id.clone();
     let serve_conn_type = Arc::clone(&connection_type_rx);
@@ -186,6 +191,7 @@ pub async fn run_sender_session(
                     let src = Arc::clone(&serve_source);
                     let bytes_counter = Arc::clone(&serve_bytes);
                     let chunks_counter = Arc::clone(&serve_chunks);
+                    let first_chunk = Arc::clone(&serve_first_chunk);
                     let prog = serve_progress.clone();
                     let tid = serve_id.clone();
                     let ct = Arc::clone(&serve_conn_type);
@@ -208,6 +214,7 @@ pub async fn run_sender_session(
                                 if stream_cancel.is_cancelled() {
                                     break;
                                 }
+                                let chunk_start = *first_chunk.get_or_init(Instant::now);
                                 let resp = match src.read_chunk_async(idx).await {
                                     Ok(payload) => {
                                         let len = payload.data.len() as u64;
@@ -222,7 +229,7 @@ pub async fn run_sender_session(
                                                 total_bytes,
                                                 done_chunks.min(total_chunks),
                                                 total_chunks,
-                                                start,
+                                                chunk_start,
                                                 *ct.lock().expect("conn_type lock poisoned"),
                                             );
                                         }
@@ -264,7 +271,8 @@ pub async fn run_sender_session(
             match ctrl_res? {
                 Some(ControlMessage::TransferComplete { verified_chunks }) => {
                     sm.on_receive(ControlMessage::TransferComplete { verified_chunks })?;
-                    let elapsed = start.elapsed();
+                    let chunk_origin = first_chunk_start.get().copied().unwrap_or(start);
+                    let elapsed = chunk_origin.elapsed();
                     let elapsed_ms = elapsed.as_millis().max(1) as u64;
                     let avg_speed = (total_bytes as f64) / elapsed.as_secs_f64().max(0.0001);
                     if let Some(ref tx) = progress_tx {
@@ -276,7 +284,7 @@ pub async fn run_sender_session(
                             total_bytes,
                             total_chunks,
                             total_chunks,
-                            start,
+                            chunk_origin,
                             *connection_type_rx.lock().expect("conn_type lock poisoned"),
                         );
                     }
@@ -380,6 +388,8 @@ pub async fn run_receiver_session_with_profile(
     write_frame(&mut ctrl_send, &accept, MAX_CONTROL_FRAME_SIZE).await?;
 
     let data_start = Instant::now();
+    // Latched the exact moment the first chunk request begins transferring over QUIC.
+    let first_chunk_start: Arc<OnceLock<Instant>> = Arc::new(OnceLock::new());
     let initial_bytes: u64 = (0..total_chunks)
         .filter(|&i| resume_bf.is_set(i))
         .filter_map(|i| manifest.locate_chunk(i).map(|(_, _, len)| len as u64))
@@ -426,6 +436,7 @@ pub async fn run_receiver_session_with_profile(
             let w_queue = Arc::clone(&queue);
             let w_assembler = Arc::clone(&assembler);
             let w_bytes = Arc::clone(&bytes_received);
+            let w_first_chunk = Arc::clone(&first_chunk_start);
             let w_progress = progress_tx.clone();
             let w_tid = transfer_id.clone();
             let w_ct = Arc::clone(&connection_type_rx);
@@ -461,6 +472,7 @@ pub async fn run_receiver_session_with_profile(
                             break;
                         };
                         let req = DataMessage::ChunkRequest { chunk_index };
+                        w_first_chunk.get_or_init(Instant::now);
                         if let Err(err) = write_data_frame(&mut send, &req, MAX_DATA_FRAME_SIZE).await {
                             // Requeue failed request + any remaining in-flight items on stream reset.
                             requeue_item(&w_queue, chunk_index, attempt, &w_cancel, TransportError::Protocol(err))?;
@@ -549,6 +561,7 @@ pub async fn run_receiver_session_with_profile(
                             let asm = Arc::clone(&w_assembler);
                             let q = Arc::clone(&w_queue);
                             let bytes = Arc::clone(&w_bytes);
+                            let chunk_origin = w_first_chunk.get().copied().unwrap_or(data_start);
                             let prog = w_progress.clone();
                             let tid = w_tid.clone();
                             let ct = Arc::clone(&w_ct);
@@ -570,7 +583,7 @@ pub async fn run_receiver_session_with_profile(
                                                 total_bytes,
                                                 outcome.verified_chunks,
                                                 outcome.total_chunks,
-                                                data_start,
+                                                chunk_origin,
                                                 *ct.lock().expect("conn_type lock poisoned"),
                                             );
                                         }
@@ -672,7 +685,8 @@ pub async fn run_receiver_session_with_profile(
         }
     }
 
-    let data_elapsed = data_start.elapsed();
+    let chunk_origin = first_chunk_start.get().copied().unwrap_or(data_start);
+    let data_elapsed = chunk_origin.elapsed();
     ctrl_watcher.abort();
 
     let finalized_paths = assembler.finalize_async().await?;
@@ -701,7 +715,7 @@ pub async fn run_receiver_session_with_profile(
             total_bytes,
             total_chunks,
             total_chunks,
-            data_start,
+            chunk_origin,
             *connection_type_rx.lock().expect("conn_type lock poisoned"),
         );
     }
@@ -812,7 +826,9 @@ fn emit_progress(
     start: Instant,
     connection_type: ConnectionType,
 ) {
-    let elapsed_secs = start.elapsed().as_secs_f64().max(0.001);
+    let elapsed = start.elapsed();
+    let elapsed_ms = elapsed.as_millis() as u64;
+    let elapsed_secs = elapsed.as_secs_f64().max(0.001);
     let speed = (bytes_transferred as f64) / elapsed_secs;
     let remaining = total_bytes.saturating_sub(bytes_transferred) as f64;
     let eta = if speed > 1.0 { remaining / speed } else { 0.0 };
@@ -826,6 +842,7 @@ fn emit_progress(
         total_chunks,
         speed_bytes_per_sec: speed,
         eta_seconds: eta,
+        elapsed_ms,
         connection_type,
     });
 }

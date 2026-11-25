@@ -103,10 +103,38 @@ class TransferCard extends StatelessWidget {
                             .labelMedium
                             ?.copyWith(fontWeight: FontWeight.w700),
                       ),
-                      Text(
-                        'ETA: ${item.status == TransferStatus.completed ? 'Done' : formatEta(item.etaSeconds)}',
-                        style: Theme.of(context).textTheme.labelSmall,
-                      ),
+                      if (item.status == TransferStatus.completed)
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.timer_outlined, size: 13),
+                            const SizedBox(width: 4),
+                            Text(
+                              item.elapsedMs > 0
+                                  ? 'Took ${formatDurationMs(item.elapsedMs)}'
+                                  : 'Done',
+                              style: Theme.of(context).textTheme.labelSmall,
+                            ),
+                          ],
+                        )
+                      else ...[
+                        if (item.elapsedMs > 0)
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.timer_outlined, size: 13),
+                              const SizedBox(width: 4),
+                              Text(
+                                formatDurationMs(item.elapsedMs),
+                                style: Theme.of(context).textTheme.labelSmall,
+                              ),
+                            ],
+                          ),
+                        Text(
+                          'ETA: ${formatEta(item.etaSeconds)}',
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                      ],
                       Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [

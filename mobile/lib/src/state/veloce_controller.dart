@@ -10,6 +10,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/veloce_models.dart';
 import '../services/platform_service.dart';
+import '../theme/veloce_themes.dart';
 
 enum TransferStatus { active, paused, completed, failed, cancelled }
 
@@ -26,6 +27,7 @@ class TransferItem {
     required this.speedBytesPerSec,
     required this.etaSeconds,
     required this.connectionType,
+    this.elapsedMs = 0,
     this.error,
     this.outputPaths = const [],
   });
@@ -41,6 +43,7 @@ class TransferItem {
   final double speedBytesPerSec;
   final double etaSeconds;
   final String connectionType;
+  final int elapsedMs;
   final String? error;
   final List<String> outputPaths;
 
@@ -65,6 +68,7 @@ class TransferItem {
         'speedBytesPerSec': speedBytesPerSec,
         'etaSeconds': etaSeconds,
         'connectionType': connectionType,
+        'elapsedMs': elapsedMs,
         'error': error,
         'outputPaths': outputPaths,
       };
@@ -90,6 +94,7 @@ class TransferItem {
       speedBytesPerSec: (json['speedBytesPerSec'] as num?)?.toDouble() ?? 0,
       etaSeconds: 0,
       connectionType: json['connectionType'] as String? ?? 'LAN',
+      elapsedMs: (json['elapsedMs'] as num?)?.toInt() ?? 0,
       error: json['error'] as String?,
       outputPaths: (json['outputPaths'] as List<dynamic>?)
               ?.whereType<String>()
@@ -108,6 +113,7 @@ class TransferItem {
     double? speedBytesPerSec,
     double? etaSeconds,
     String? connectionType,
+    int? elapsedMs,
     String? error,
     bool clearError = false,
     List<String>? outputPaths,
@@ -124,6 +130,7 @@ class TransferItem {
       speedBytesPerSec: speedBytesPerSec ?? this.speedBytesPerSec,
       etaSeconds: etaSeconds ?? this.etaSeconds,
       connectionType: connectionType ?? this.connectionType,
+      elapsedMs: elapsedMs ?? this.elapsedMs,
       error: clearError ? null : (error ?? this.error),
       outputPaths: outputPaths ?? this.outputPaths,
     );
@@ -135,17 +142,29 @@ class VeloceSettings {
     required this.deviceName,
     required this.relayHost,
     required this.exportToDownloads,
-    required this.themeMode,
+    this.themeId = VeloceThemeId.obsidian,
+    ThemeMode? themeMode,
     this.customSaveUri = '',
     this.customSaveLabel = '',
-  });
+  }) : _legacyThemeMode = themeMode;
 
   final String deviceName;
   final String relayHost;
   final bool exportToDownloads;
-  final ThemeMode themeMode;
+  final VeloceThemeId themeId;
+  final ThemeMode? _legacyThemeMode;
   final String customSaveUri;
   final String customSaveLabel;
+
+  VeloceThemeId get effectiveThemeId {
+    if (_legacyThemeMode == ThemeMode.light && themeId == VeloceThemeId.obsidian) {
+      return VeloceThemeId.daylight;
+    }
+    return themeId;
+  }
+
+  ThemeMode get themeMode =>
+      effectiveThemeId.isDark ? ThemeMode.dark : ThemeMode.light;
 
   bool get hasCustomSaveFolder => customSaveUri.trim().isNotEmpty;
 
@@ -165,15 +184,22 @@ class VeloceSettings {
     String? deviceName,
     String? relayHost,
     bool? exportToDownloads,
+    VeloceThemeId? themeId,
     ThemeMode? themeMode,
     String? customSaveUri,
     String? customSaveLabel,
   }) {
+    final resolvedTheme = themeId ??
+        (themeMode != null
+            ? (themeMode == ThemeMode.light
+                ? VeloceThemeId.daylight
+                : VeloceThemeId.obsidian)
+            : effectiveThemeId);
     return VeloceSettings(
       deviceName: deviceName ?? this.deviceName,
       relayHost: relayHost ?? this.relayHost,
       exportToDownloads: exportToDownloads ?? this.exportToDownloads,
-      themeMode: themeMode ?? this.themeMode,
+      themeId: resolvedTheme,
       customSaveUri: customSaveUri ?? this.customSaveUri,
       customSaveLabel: customSaveLabel ?? this.customSaveLabel,
     );
@@ -196,6 +222,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   static const _prefRelayHost = 'veloce.relayHost';
   static const _prefExportDownloads = 'veloce.exportDownloads';
   static const _prefThemeDark = 'veloce.themeDark';
+  static const _prefThemeId = 'veloce.themeId';
   static const _prefCustomSaveUri = 'veloce.customSaveUri';
   static const _prefCustomSaveLabel = 'veloce.customSaveLabel';
   static const _prefHistory = 'veloce.transferHistory';
@@ -204,7 +231,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     deviceName: Platform.isIOS ? 'Veloce iPhone' : 'Veloce Mobile',
     relayHost: '',
     exportToDownloads: true,
-    themeMode: ThemeMode.dark,
+    themeId: VeloceThemeId.obsidian,
   );
 
   AppNodeInfo? _nodeInfo;
@@ -217,6 +244,13 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   AppEventIncomingOffer? _pendingOffer;
   StreamSubscription<AppEngineEvent>? _eventSub;
   bool _foregroundServiceActive = false;
+  bool _disposed = false;
+
+  void _safeNotifyListeners() {
+    if (!_disposed) {
+      notifyListeners();
+    }
+  }
 
   VeloceSettings get settings => _settings;
   AppNodeInfo? get nodeInfo => _nodeInfo;
@@ -273,13 +307,15 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     try {
       final prefs = await SharedPreferences.getInstance();
       final defaultName = Platform.isIOS ? 'Veloce iPhone' : 'Veloce Android';
+      final savedThemeId = VeloceThemeId.parse(
+        prefs.getString(_prefThemeId),
+        fallbackDark: prefs.getBool(_prefThemeDark) ?? true,
+      );
       _settings = VeloceSettings(
         deviceName: prefs.getString(_prefDeviceName) ?? defaultName,
         relayHost: prefs.getString(_prefRelayHost) ?? '',
         exportToDownloads: prefs.getBool(_prefExportDownloads) ?? true,
-        themeMode: (prefs.getBool(_prefThemeDark) ?? true)
-            ? ThemeMode.dark
-            : ThemeMode.light,
+        themeId: savedThemeId,
         customSaveUri: prefs.getString(_prefCustomSaveUri) ?? '',
         customSaveLabel: prefs.getString(_prefCustomSaveLabel) ?? '',
       );
@@ -390,7 +426,9 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     } catch (err) {
       _initError = _humanizeError(err);
     }
-    notifyListeners();
+    if (!_disposed) {
+      _safeNotifyListeners();
+    }
   }
 
   /// Opens the native folder picker (Android SAF `ACTION_OPEN_DOCUMENT_TREE` or iOS directory picker)
@@ -466,7 +504,8 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
       await prefs.setString(_prefDeviceName, next.deviceName);
       await prefs.setString(_prefRelayHost, next.relayHost);
       await prefs.setBool(_prefExportDownloads, next.exportToDownloads);
-      await prefs.setBool(_prefThemeDark, next.themeMode == ThemeMode.dark);
+      await prefs.setBool(_prefThemeDark, next.effectiveThemeId.isDark);
+      await prefs.setString(_prefThemeId, next.effectiveThemeId.name);
       await prefs.setString(_prefCustomSaveUri, next.customSaveUri);
       await prefs.setString(_prefCustomSaveLabel, next.customSaveLabel);
     } catch (_) {
@@ -479,11 +518,11 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  void toggleTheme() {
-    final nextMode =
-        _settings.themeMode == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
-    unawaited(updateSettings(_settings.copyWith(themeMode: nextMode)));
+  void cycleTheme() {
+    unawaited(updateSettings(_settings.copyWith(themeId: _settings.effectiveThemeId.next)));
   }
+
+  void toggleTheme() => cycleTheme();
 
   Future<bool> startSession(List<String> paths, {String? targetPeerNodeId}) async {
     if (paths.isEmpty) return false;
@@ -527,7 +566,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
       return false;
     } finally {
       _busy = false;
-      notifyListeners();
+      _safeNotifyListeners();
     }
   }
 
@@ -575,7 +614,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
       return false;
     } finally {
       _busy = false;
-      notifyListeners();
+      _safeNotifyListeners();
     }
   }
 
@@ -605,7 +644,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     } catch (err) {
       _actionError = _humanizeError(err);
     }
-    notifyListeners();
+    _safeNotifyListeners();
   }
 
   void rejectPendingOffer() {
@@ -643,11 +682,11 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           );
         }
         await _syncActiveTransferGuards();
-        notifyListeners();
+        _safeNotifyListeners();
       }
     } catch (err) {
       _actionError = _humanizeError(err);
-      notifyListeners();
+      _safeNotifyListeners();
     }
   }
 
@@ -685,7 +724,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     }
     unawaited(_persistHistory());
     unawaited(_syncActiveTransferGuards());
-    notifyListeners();
+    _safeNotifyListeners();
   }
 
   /// Clears all completed, failed, and cancelled transfers from history while keeping active ones.
@@ -733,6 +772,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           :final totalChunks,
           :final speedBytesPerSec,
           :final etaSeconds,
+          :final elapsedMs,
           :final connectionType,
         ):
         final existing = _transfers[transferId];
@@ -751,6 +791,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           speedBytesPerSec: speedBytesPerSec,
           etaSeconds: etaSeconds,
           connectionType: connectionType,
+          elapsedMs: elapsedMs > 0 ? elapsedMs : (existing?.elapsedMs ?? 0),
         );
       case AppEventTransferPaused(:final transferId):
         final existing = _transfers[transferId];
@@ -774,6 +815,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           :final direction,
           :final totalBytes,
           :final totalChunks,
+          :final elapsedMs,
           :final averageSpeedBytesPerSec,
           :final outputPaths,
         ):
@@ -793,6 +835,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           speedBytesPerSec: averageSpeedBytesPerSec,
           etaSeconds: 0,
           connectionType: existing?.connectionType ?? 'LAN',
+          elapsedMs: elapsedMs > 0 ? elapsedMs : (existing?.elapsedMs ?? 0),
           outputPaths: outputPaths,
         );
         unawaited(_persistHistory());
@@ -834,7 +877,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     }
 
     unawaited(_syncActiveTransferGuards());
-    notifyListeners();
+    _safeNotifyListeners();
   }
 
   Future<void> _exportCompletedTransfer(
@@ -852,11 +895,12 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
       customDisplayPath: displayPath,
       stagingRoot: _nodeInfo?.defaultDownloadDir,
     );
+    if (_disposed) return;
     final current = _transfers[transferId];
     if (current != null && exported.isNotEmpty) {
       _transfers[transferId] = current.copyWith(outputPaths: exported);
       await _persistHistory();
-      notifyListeners();
+      _safeNotifyListeners();
     }
   }
 
@@ -883,6 +927,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _disposed = true;
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_eventSub?.cancel());
     unawaited(_platform.stopForegroundTransferService());

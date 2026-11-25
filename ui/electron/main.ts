@@ -39,12 +39,32 @@ interface NativeAddon {
   parseTicket(ticketCode: string): string;
 }
 
+export type DesktopThemeId = "dark" | "light" | "midnight" | "nord" | "emerald" | "sunset";
+
+const VALID_THEMES: ReadonlySet<string> = new Set([
+  "dark",
+  "light",
+  "midnight",
+  "nord",
+  "emerald",
+  "sunset",
+]);
+
+const THEME_BG_COLORS: Record<DesktopThemeId, string> = {
+  dark: "#0c0f14",
+  light: "#f4f6fa",
+  midnight: "#000000",
+  nord: "#1b222c",
+  emerald: "#09130f",
+  sunset: "#140e12",
+};
+
 export interface DesktopSettings {
   deviceName: string;
   downloadDir: string;
   relayAddrs: string[];
   parallelStreams: number;
-  theme: "dark" | "light";
+  theme: DesktopThemeId;
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -92,8 +112,10 @@ function sanitizeSettings(raw: Partial<DesktopSettings>, fallback: DesktopSettin
       ? Math.round(raw.parallelStreams)
       : fallback.parallelStreams;
   const parallelStreams = Math.min(32, Math.max(1, rawStreams));
-  const theme: "dark" | "light" =
-    raw.theme === "light" || raw.theme === "dark" ? raw.theme : fallback.theme;
+  const theme: DesktopThemeId =
+    typeof raw.theme === "string" && VALID_THEMES.has(raw.theme)
+      ? (raw.theme as DesktopThemeId)
+      : fallback.theme;
 
   return {
     deviceName,
@@ -228,7 +250,7 @@ function createWindow(): void {
     minHeight: 620,
     title: "Veloce — P2P File Transfer",
     icon: iconPath,
-    backgroundColor: currentSettings.theme === "light" ? "#f4f6fa" : "#0c0f14",
+    backgroundColor: THEME_BG_COLORS[currentSettings.theme] ?? "#0c0f14",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,

@@ -2,6 +2,7 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   CheckCircle2,
+  Clock,
   Pause,
   Play,
   RotateCcw,
@@ -11,7 +12,7 @@ import {
   XCircle,
 } from "lucide-react";
 import type { TransferRecord } from "../types/veloce";
-import { formatBytes, formatEta, formatSpeed } from "../utils/format";
+import { formatBytes, formatDurationMs, formatEta, formatSpeed } from "../utils/format";
 import { ConnectionBadge } from "./ConnectionBadge";
 
 interface TransferCardProps {
@@ -180,14 +181,29 @@ export function TransferCard({
                   : formatSpeed(transfer.speedBytesPerSec)}
             </strong>
           </span>
-          <span>
-            ETA:{" "}
-            {transfer.status === "completed"
-              ? "Done"
-              : transfer.status === "paused" || transfer.status === "cancelled"
-                ? "—"
-                : formatEta(transfer.etaSeconds)}
-          </span>
+          {transfer.status === "completed" ? (
+            <span className="duration-chip" title="Time taken from when chunks started transferring">
+              <Clock size={13} />
+              {transfer.elapsedMs && transfer.elapsedMs > 0
+                ? `Took ${formatDurationMs(transfer.elapsedMs)}`
+                : "Done"}
+            </span>
+          ) : (
+            <>
+              {transfer.elapsedMs && transfer.elapsedMs > 0 ? (
+                <span className="duration-chip" title="Elapsed chunk transfer time">
+                  <Clock size={13} />
+                  {formatDurationMs(transfer.elapsedMs)}
+                </span>
+              ) : null}
+              <span>
+                ETA:{" "}
+                {transfer.status === "paused" || transfer.status === "cancelled"
+                  ? "—"
+                  : formatEta(transfer.etaSeconds)}
+              </span>
+            </>
+          )}
           <span className="chunk-status">
             <ShieldCheck size={13} />
             {transfer.chunksVerified} / {transfer.totalChunks} chunks verified
