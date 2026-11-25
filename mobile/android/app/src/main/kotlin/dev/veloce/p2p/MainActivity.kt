@@ -1,15 +1,18 @@
 package dev.veloce.p2p
 
+import android.app.Activity
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import io.flutter.embedding.android.FlutterActivity
@@ -22,9 +25,11 @@ import java.util.concurrent.Executors
 
 class MainActivity : FlutterActivity() {
     private val channelName = "dev.veloce.p2p/platform"
+    private val requestCodePickFolder = 4091
     private var multicastLock: WifiManager.MulticastLock? = null
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var pendingFolderResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -53,16 +58,131 @@ class MainActivity : FlutterActivity() {
                     "getLocalWifiAddresses" -> {
                         result.success(queryActiveWifiAddresses())
                     }
+                    "pickCustomSaveFolder" -> {
+                        launchCustomFolderPicker(result)
+                    }
+                    "releaseCustomSaveFolder" -> {
+                        val uriStr = call.argument<String>("uri")
+                        releasePersistedFolderGrant(uriStr)
+                        result.success(null)
+                    }
                     "exportToPublicDownloads" -> {
                         val paths = call.argument<List<String>>("paths") ?: emptyList()
+                        val customTreeUri = call.argument<String>("customTreeUri")
+                        val customDisplayPath = call.argument<String>("customDisplayPath")
+                        val stagingRoot = call.argument<String>("stagingRoot")
                         ioExecutor.execute {
-                            val exported = exportFilesToPublicDownloads(paths)
+                            val exported = exportCompletedFiles(
+                                paths = paths,
+                                customTreeUri = customTreeUri,
+                                customDisplayPath = customDisplayPath,
+                                stagingRoot = stagingRoot,
+                            )
                             mainHandler.post { result.success(exported) }
                         }
                     }
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun launchCustomFolderPicker(result: MethodChannel.Result) {
+        pendingFolderResult?.success(null)
+        pendingFolderResult = result
+        try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+                )
+            }
+            @Suppress("DEPRECATION")
+            startActivityForResult(intent, requestCodePickFolder)
+        } catch (_: Exception) {
+            pendingFolderResult = null
+            result.success(null)
+        }
+    }
+
+    private fun releasePersistedFolderGrant(uriStr: String?) {
+        if (uriStr.isNullOrBlank()) return
+        try {
+            val uri = Uri.parse(uriStr)
+            val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            applicationContext.contentResolver.releasePersistableUriPermission(uri, flags)
+        } catch (_: Exception) {
+            // Ignore if permission was already revoked.
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == requestCodePickFolder) {
+            val callback = pendingFolderResult
+            pendingFolderResult = null
+            if (callback != null) {
+                val treeUri = if (resultCode == Activity.RESULT_OK) data?.data else null
+                if (treeUri != null) {
+                    val persistFlags = (data?.flags ?: 0) and
+                        (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    val effectiveFlags = if (persistFlags != 0) {
+                        persistFlags
+                    } else {
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    }
+                    try {
+                        applicationContext.contentResolver.takePersistableUriPermission(
+                            treeUri,
+                            effectiveFlags
+                        )
+                    } catch (_: Exception) {
+                        // Some OEM file providers grant tree access without persistable flag.
+                    }
+                    callback.success(
+                        mapOf(
+                            "uri" to treeUri.toString(),
+                            "displayPath" to formatTreeUriDisplayName(treeUri),
+                        )
+                    )
+                } else {
+                    callback.success(null)
+                }
+            }
+            return
+        }
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+    }
+
+    private fun formatTreeUriDisplayName(treeUri: Uri): String {
+        return try {
+            val docId = DocumentsContract.getTreeDocumentId(treeUri)
+            val colonIdx = docId.indexOf(':')
+            if (colonIdx >= 0) {
+                val volume = docId.substring(0, colonIdx)
+                val rel = docId.substring(colonIdx + 1).trim('/')
+                if (volume.equals("primary", ignoreCase = true)) {
+                    when {
+                        rel.isEmpty() -> "Internal Storage"
+                        rel.equals("Download", ignoreCase = true) ||
+                            rel.equals("Downloads", ignoreCase = true) -> "Downloads"
+                        rel.startsWith("Download/", ignoreCase = true) ->
+                            "Downloads/${rel.substringAfter('/')}"
+                        else -> "Internal Storage/$rel"
+                    }
+                } else {
+                    if (rel.isEmpty()) "External Storage ($volume)" else "External Storage/$rel"
+                }
+            } else if (docId.isNotBlank()) {
+                docId
+            } else {
+                treeUri.lastPathSegment ?: "Custom Folder"
+            }
+        } catch (_: Exception) {
+            treeUri.lastPathSegment ?: "Custom Folder"
+        }
     }
 
     private fun acquireMulticastLock() {
@@ -105,11 +225,30 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * Copies completed sandboxed transfer files out of app-private storage into the
-     * user-visible Downloads/Veloce directory via MediaStore.Downloads (Android 10+)
-     * or public Downloads (Android 7–9), removing the sandbox copy only after verified write.
+     * Copies completed sandboxed transfer files out of app-private storage into either:
+     * 1. The user's chosen Android SAF custom folder (`customTreeUri`, preserving subdirectories), or
+     * 2. User-visible Downloads/Veloce via MediaStore.Downloads (Android 10+) / legacy Downloads,
+     * removing the temporary sandbox copy only after a verified write.
      */
-    private fun exportFilesToPublicDownloads(paths: List<String>): List<String> {
+    private fun exportCompletedFiles(
+        paths: List<String>,
+        customTreeUri: String?,
+        customDisplayPath: String?,
+        stagingRoot: String?,
+    ): List<String> {
+        val parsedTree = if (!customTreeUri.isNullOrBlank()) {
+            try {
+                Uri.parse(customTreeUri)
+            } catch (_: Exception) {
+                null
+            }
+        } else {
+            null
+        }
+        val treeLabel = customDisplayPath?.takeIf { it.isNotBlank() }
+            ?: parsedTree?.let { formatTreeUriDisplayName(it) }
+            ?: "Custom Folder"
+
         val results = mutableListOf<String>()
         for (rawPath in paths) {
             val srcFile = File(rawPath)
@@ -117,24 +256,174 @@ class MainActivity : FlutterActivity() {
                 results.add(rawPath)
                 continue
             }
-            val exportedPath = try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    exportViaMediaStore(srcFile)
-                } else {
-                    exportViaLegacyDownloads(srcFile)
+
+            val exportedPath = if (parsedTree != null) {
+                val safResult = try {
+                    exportViaSafTree(srcFile, parsedTree, treeLabel, stagingRoot)
+                } catch (_: Exception) {
+                    null
                 }
-            } catch (_: Exception) {
-                null
+                safResult ?: try {
+                    exportToDefaultDownloads(srcFile)
+                } catch (_: Exception) {
+                    null
+                }
+            } else {
+                try {
+                    exportToDefaultDownloads(srcFile)
+                } catch (_: Exception) {
+                    null
+                }
             }
+
             if (exportedPath != null) {
                 srcFile.delete()
                 results.add(exportedPath)
             } else {
-                // Keep the verified sandbox file intact if public export fails.
+                // Keep the verified sandbox file intact if export fails.
                 results.add(rawPath)
             }
         }
         return results
+    }
+
+    private fun exportToDefaultDownloads(srcFile: File): String? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            exportViaMediaStore(srcFile)
+        } else {
+            exportViaLegacyDownloads(srcFile)
+        }
+    }
+
+    private fun exportViaSafTree(
+        srcFile: File,
+        treeUri: Uri,
+        treeLabel: String,
+        stagingRoot: String?,
+    ): String? {
+        val resolver = applicationContext.contentResolver
+        val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
+        var targetParentDocId = rootDocId
+        val subDirs = extractRelativeSubdirectories(srcFile, stagingRoot)
+
+        for (dirName in subDirs) {
+            val nextDocId = findOrCreateSafDirectory(treeUri, targetParentDocId, dirName)
+                ?: return null
+            targetParentDocId = nextDocId
+        }
+
+        val existingNames = listSafChildNames(treeUri, targetParentDocId)
+        val uniqueName = resolveUniqueName(existingNames, srcFile.name)
+        val parentDocUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, targetParentDocId)
+        val mimeType = guessMimeType(uniqueName)
+        val createdUri = DocumentsContract.createDocument(
+            resolver,
+            parentDocUri,
+            mimeType,
+            uniqueName
+        ) ?: return null
+
+        try {
+            resolver.openOutputStream(createdUri)?.use { out ->
+                srcFile.inputStream().use { input ->
+                    input.copyTo(out, bufferSize = 256 * 1024)
+                }
+                out.flush()
+            } ?: run {
+                try {
+                    DocumentsContract.deleteDocument(resolver, createdUri)
+                } catch (_: Exception) {}
+                return null
+            }
+            val relPrefix = if (subDirs.isEmpty()) "" else "${subDirs.joinToString("/")}/"
+            return "$treeLabel/$relPrefix$uniqueName"
+        } catch (err: Exception) {
+            try {
+                DocumentsContract.deleteDocument(resolver, createdUri)
+            } catch (_: Exception) {}
+            throw err
+        }
+    }
+
+    private fun extractRelativeSubdirectories(srcFile: File, stagingRoot: String?): List<String> {
+        if (stagingRoot.isNullOrBlank()) return emptyList()
+        return try {
+            val rootCanonical = File(stagingRoot).canonicalPath.trimEnd(File.separatorChar)
+            val parentCanonical = srcFile.canonicalFile.parentFile?.canonicalPath?.trimEnd(File.separatorChar)
+                ?: return emptyList()
+            val prefix = "$rootCanonical${File.separatorChar}"
+            if (!parentCanonical.startsWith(prefix)) {
+                return emptyList()
+            }
+            val rel = parentCanonical.substring(prefix.length)
+            rel.split(File.separatorChar)
+                .filter { it.isNotBlank() && it != "." && it != ".." }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun findOrCreateSafDirectory(
+        treeUri: Uri,
+        parentDocId: String,
+        dirName: String,
+    ): String? {
+        val resolver = applicationContext.contentResolver
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+        )
+        resolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+            while (cursor.moveToNext()) {
+                val id = cursor.getString(0)
+                val name = cursor.getString(1)
+                val mime = cursor.getString(2)
+                if (name == dirName && mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                    return id
+                }
+            }
+        }
+        val parentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, parentDocId)
+        val created = DocumentsContract.createDocument(
+            resolver,
+            parentUri,
+            DocumentsContract.Document.MIME_TYPE_DIR,
+            dirName
+        ) ?: return null
+        return DocumentsContract.getDocumentId(created)
+    }
+
+    private fun listSafChildNames(treeUri: Uri, parentDocId: String): Set<String> {
+        val names = mutableSetOf<String>()
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
+        val projection = arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+        try {
+            applicationContext.contentResolver.query(childrenUri, projection, null, null, null)
+                ?.use { cursor ->
+                    while (cursor.moveToNext()) {
+                        cursor.getString(0)?.let { names.add(it) }
+                    }
+                }
+        } catch (_: Exception) {
+            // Proceed even if directory listing is restricted.
+        }
+        return names
+    }
+
+    private fun resolveUniqueName(existingNames: Set<String>, filename: String): String {
+        if (!existingNames.contains(filename)) return filename
+        val dot = filename.lastIndexOf('.')
+        val stem = if (dot > 0) filename.substring(0, dot) else filename
+        val ext = if (dot > 0) filename.substring(dot) else ""
+        var counter = 1
+        var candidate = "$stem ($counter)$ext"
+        while (existingNames.contains(candidate)) {
+            counter++
+            candidate = "$stem ($counter)$ext"
+        }
+        return candidate
     }
 
     private fun exportViaMediaStore(srcFile: File): String? {

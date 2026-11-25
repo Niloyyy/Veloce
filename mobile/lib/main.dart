@@ -49,17 +49,22 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
         showModalBottomSheet<void>(
           context: context,
           isDismissible: false,
-          builder: (ctx) => IncomingOfferSheet(
-            offer: offer,
-            onAccept: () {
-              Navigator.of(ctx).pop();
-              _controller.acceptPendingOffer();
-              setState(() => _tabIndex = 2);
-            },
-            onReject: () {
-              Navigator.of(ctx).pop();
-              _controller.rejectPendingOffer();
-            },
+          builder: (ctx) => ListenableBuilder(
+            listenable: _controller,
+            builder: (_, __) => IncomingOfferSheet(
+              offer: offer,
+              saveDestinationLabel: _controller.settings.effectiveSaveLabel,
+              onChooseSaveFolder: () => _controller.chooseCustomSaveFolder(),
+              onAccept: () {
+                Navigator.of(ctx).pop();
+                _controller.acceptPendingOffer();
+                setState(() => _tabIndex = 2);
+              },
+              onReject: () {
+                Navigator.of(ctx).pop();
+                _controller.rejectPendingOffer();
+              },
+            ),
           ),
         );
       });
@@ -143,6 +148,7 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
                         builder: (_) => SettingsSheet(
                           settings: _controller.settings,
                           onSave: _controller.updateSettings,
+                          onPickSaveFolder: _controller.pickSaveFolderOnly,
                         ),
                       );
                     },

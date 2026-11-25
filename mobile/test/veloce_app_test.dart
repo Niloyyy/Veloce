@@ -7,6 +7,7 @@ import 'package:veloce_mobile/src/services/platform_service.dart';
 import 'package:veloce_mobile/src/state/veloce_controller.dart';
 import 'package:veloce_mobile/src/utils/formatters.dart';
 import 'package:veloce_mobile/src/widgets/connection_badge.dart';
+import 'package:veloce_mobile/src/widgets/settings_sheet.dart';
 import 'package:veloce_mobile/src/widgets/transfer_card.dart';
 
 class FakeRustBridge implements VeloceRustBridge {
@@ -117,12 +118,32 @@ class FakeRustBridge implements VeloceRustBridge {
 
 class RecordingPlatformService extends VelocePlatformService {
   final List<List<String>> exportedBatches = [];
+  final List<String?> exportedTreeUris = [];
+  final List<String> releasedUris = [];
+  PickedSaveFolder? nextPickedFolder;
 
   @override
-  Future<List<String>> exportToPublicDownloads(List<String> sourcePaths) async {
+  Future<PickedSaveFolder?> pickCustomSaveFolder() async => nextPickedFolder;
+
+  @override
+  Future<void> releaseCustomSaveFolder(String uri) async {
+    releasedUris.add(uri);
+  }
+
+  @override
+  Future<List<String>> exportToPublicDownloads(
+    List<String> sourcePaths, {
+    String? customTreeUri,
+    String? customDisplayPath,
+    String? stagingRoot,
+  }) async {
     exportedBatches.add(sourcePaths);
+    exportedTreeUris.add(customTreeUri);
+    final base = (customDisplayPath != null && customDisplayPath.isNotEmpty)
+        ? customDisplayPath
+        : 'Download/Veloce';
     return sourcePaths
-        .map((p) => 'Download/Veloce/${p.split('/').last}')
+        .map((p) => '$base/${p.split('/').last}')
         .toList(growable: false);
   }
 }
@@ -289,5 +310,86 @@ void main() {
     ctrl.clearCompletedTransfers();
     expect(ctrl.transfers, isEmpty);
     ctrl.dispose();
+  });
+
+  test('VeloceController selects, exports to, and resets custom SAF save folder',
+      () async {
+    final fake = FakeRustBridge();
+    final platform = RecordingPlatformService()
+      ..nextPickedFolder = const PickedSaveFolder(
+        uri: 'content://com.android.externalstorage.documents/tree/primary%3ADocuments%2FWork',
+        displayPath: 'Internal Storage/Documents/Work',
+      );
+    final ctrl = VeloceController(
+      bridge: fake,
+      platformService: platform,
+      enableWakelock: false,
+    );
+
+    final picked = await ctrl.chooseCustomSaveFolder();
+    expect(picked, isTrue);
+    expect(ctrl.settings.hasCustomSaveFolder, isTrue);
+    expect(ctrl.settings.effectiveSaveLabel, 'Internal Storage/Documents/Work');
+
+    ctrl.handleEngineEvent(
+      const AppEventTransferCompleted(
+        transferId: 'rx_custom',
+        direction: 'receive',
+        totalBytes: 1024,
+        totalChunks: 1,
+        elapsedMs: 40,
+        averageSpeedBytesPerSec: 25600,
+        outputPaths: ['/data/user/0/dev.veloce.p2p/files/Veloce/report.pdf'],
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(platform.exportedTreeUris.last, ctrl.settings.customSaveUri);
+    expect(
+      ctrl.transfers.single.outputPaths,
+      ['Internal Storage/Documents/Work/report.pdf'],
+    );
+
+    final prevUri = ctrl.settings.customSaveUri;
+    await ctrl.resetCustomSaveFolder();
+    expect(ctrl.settings.hasCustomSaveFolder, isFalse);
+    expect(platform.releasedUris, [prevUri]);
+    ctrl.dispose();
+  });
+
+  testWidgets('SettingsSheet lets user pick and save custom destination folder',
+      (tester) async {
+    VeloceSettings? saved;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SettingsSheet(
+            settings: const VeloceSettings(
+              deviceName: 'My Phone',
+              relayHost: '',
+              exportToDownloads: true,
+              themeMode: ThemeMode.dark,
+            ),
+            onPickSaveFolder: () async => const PickedSaveFolder(
+              uri: 'content://tree/custom',
+              displayPath: 'Downloads/MyProjects',
+            ),
+            onSave: (next) => saved = next,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Save Destination Folder'), findsOneWidget);
+    await tester.ensureVisible(find.text('Choose Folder'));
+    await tester.tap(find.text('Choose Folder'));
+    await tester.pumpAndSettle();
+    expect(find.text('Downloads/MyProjects'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('Save & Apply'));
+    await tester.tap(find.text('Save & Apply'));
+    await tester.pumpAndSettle();
+    expect(saved?.customSaveUri, 'content://tree/custom');
+    expect(saved?.customSaveLabel, 'Downloads/MyProjects');
   });
 }

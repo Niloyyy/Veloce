@@ -10,11 +10,15 @@ class IncomingOfferSheet extends StatelessWidget {
     required this.offer,
     required this.onAccept,
     required this.onReject,
+    this.saveDestinationLabel,
+    this.onChooseSaveFolder,
   });
 
   final AppEventIncomingOffer offer;
   final VoidCallback onAccept;
   final VoidCallback onReject;
+  final String? saveDestinationLabel;
+  final VoidCallback? onChooseSaveFolder;
 
   @override
   Widget build(BuildContext context) {
@@ -98,7 +102,41 @@ class IncomingOfferSheet extends StatelessWidget {
                 },
               ),
             ),
-            const SizedBox(height: 18),
+            if (saveDestinationLabel != null) ...[
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.folder_outlined, size: 17),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Save to: $saveDestinationLabel',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                    if (onChooseSaveFolder != null)
+                      TextButton.icon(
+                        onPressed: onChooseSaveFolder,
+                        icon: const Icon(Icons.folder_open_rounded, size: 16),
+                        label: const Text('Change'),
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+            const SizedBox(height: 16),
             Row(
               children: [
                 Expanded(

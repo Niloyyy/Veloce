@@ -208,6 +208,37 @@ class _ReceiveTabState extends State<ReceiveTab> {
                     ),
                   ),
                 ],
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.folder_outlined, size: 17),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Save to: ${ctrl.settings.effectiveSaveLabel}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: ctrl.busy ? null : ctrl.chooseCustomSaveFolder,
+                        icon: const Icon(Icons.folder_open_rounded, size: 16),
+                        label: const Text('Change'),
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
                 const SizedBox(height: 14),
                 SizedBox(
                   width: double.infinity,

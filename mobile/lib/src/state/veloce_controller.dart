@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -135,24 +136,46 @@ class VeloceSettings {
     required this.relayHost,
     required this.exportToDownloads,
     required this.themeMode,
+    this.customSaveUri = '',
+    this.customSaveLabel = '',
   });
 
   final String deviceName;
   final String relayHost;
   final bool exportToDownloads;
   final ThemeMode themeMode;
+  final String customSaveUri;
+  final String customSaveLabel;
+
+  bool get hasCustomSaveFolder => customSaveUri.trim().isNotEmpty;
+
+  String get effectiveSaveLabel {
+    if (hasCustomSaveFolder) {
+      return customSaveLabel.trim().isNotEmpty
+          ? customSaveLabel.trim()
+          : customSaveUri.trim();
+    }
+    if (exportToDownloads) {
+      return Platform.isIOS ? 'Files / Veloce (Default)' : 'Downloads/Veloce (Default)';
+    }
+    return 'App Storage / Veloce';
+  }
 
   VeloceSettings copyWith({
     String? deviceName,
     String? relayHost,
     bool? exportToDownloads,
     ThemeMode? themeMode,
+    String? customSaveUri,
+    String? customSaveLabel,
   }) {
     return VeloceSettings(
       deviceName: deviceName ?? this.deviceName,
       relayHost: relayHost ?? this.relayHost,
       exportToDownloads: exportToDownloads ?? this.exportToDownloads,
       themeMode: themeMode ?? this.themeMode,
+      customSaveUri: customSaveUri ?? this.customSaveUri,
+      customSaveLabel: customSaveLabel ?? this.customSaveLabel,
     );
   }
 }
@@ -173,6 +196,8 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   static const _prefRelayHost = 'veloce.relayHost';
   static const _prefExportDownloads = 'veloce.exportDownloads';
   static const _prefThemeDark = 'veloce.themeDark';
+  static const _prefCustomSaveUri = 'veloce.customSaveUri';
+  static const _prefCustomSaveLabel = 'veloce.customSaveLabel';
   static const _prefHistory = 'veloce.transferHistory';
 
   VeloceSettings _settings = VeloceSettings(
@@ -255,6 +280,8 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
         themeMode: (prefs.getBool(_prefThemeDark) ?? true)
             ? ThemeMode.dark
             : ThemeMode.light,
+        customSaveUri: prefs.getString(_prefCustomSaveUri) ?? '',
+        customSaveLabel: prefs.getString(_prefCustomSaveLabel) ?? '',
       );
 
       final rawHistory = prefs.getString(_prefHistory);
@@ -295,11 +322,17 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<String> _resolveDownloadDir() async {
     try {
-      // On iOS, ApplicationDocumentsDirectory/Veloce is directly exposed in the iOS Files
-      // app via UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace.
-      // On Android, verified chunks write to app-private storage first (for POSIX pwrite
-      // & resume bitfields), then export to public Downloads/Veloce via MediaStore on completion.
-      if (!Platform.isIOS && _settings.exportToDownloads) {
+      // On iOS / desktop, when the user picked a direct filesystem folder, write verified chunks directly there.
+      // On Android, verified chunks always stage in app-private storage first (avoiding Scoped Storage
+      // EACCES on POSIX pwrite & resume bitfields), then export to the chosen SAF tree or MediaStore Downloads.
+      if (!Platform.isAndroid &&
+          _settings.hasCustomSaveFolder &&
+          !_settings.customSaveUri.startsWith('content://')) {
+        final customDir = Directory(_settings.customSaveUri.trim());
+        await customDir.create(recursive: true);
+        return customDir.path;
+      }
+      if (!Platform.isIOS && (_settings.exportToDownloads || _settings.hasCustomSaveFolder)) {
         final downloads = await getDownloadsDirectory();
         if (downloads != null) {
           final dir = Directory('${downloads.path}/Veloce');
@@ -314,6 +347,15 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     } catch (_) {
       return Directory.systemTemp.path;
     }
+  }
+
+  String? _activeReceiveOutputDir() {
+    if (!Platform.isAndroid &&
+        _settings.hasCustomSaveFolder &&
+        !_settings.customSaveUri.startsWith('content://')) {
+      return _settings.customSaveUri.trim();
+    }
+    return _nodeInfo?.defaultDownloadDir;
   }
 
   Future<void> _startEngine() async {
@@ -351,10 +393,71 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  /// Opens the native folder picker (Android SAF `ACTION_OPEN_DOCUMENT_TREE` or iOS directory picker)
+  /// without mutating settings yet, so `SettingsSheet` can preview before applying.
+  Future<PickedSaveFolder?> pickSaveFolderOnly() async {
+    try {
+      final nativePicked = await _platform.pickCustomSaveFolder();
+      if (nativePicked != null) {
+        return nativePicked;
+      }
+      if (!Platform.isAndroid) {
+        final dirPath = await FilePicker.platform.getDirectoryPath(
+          dialogTitle: 'Choose Save Folder',
+        );
+        if (dirPath != null && dirPath.trim().isNotEmpty) {
+          final clean = dirPath.trim();
+          final parts = clean.split(Platform.pathSeparator).where((s) => s.isNotEmpty).toList();
+          final label = parts.length >= 2
+              ? '${parts[parts.length - 2]}/${parts.last}'
+              : (parts.isNotEmpty ? parts.last : clean);
+          return PickedSaveFolder(uri: clean, displayPath: label);
+        }
+      }
+    } catch (err) {
+      reportError('Could not open folder picker: $err');
+    }
+    return null;
+  }
+
+  /// Picks a custom destination folder and immediately persists it as the active save location.
+  Future<bool> chooseCustomSaveFolder() async {
+    final picked = await pickSaveFolderOnly();
+    if (picked == null) return false;
+    await updateSettings(
+      _settings.copyWith(
+        customSaveUri: picked.uri,
+        customSaveLabel: picked.displayPath,
+      ),
+    );
+    return true;
+  }
+
+  /// Clears any custom save folder (releasing Android SAF URI permission) and restores default Downloads/Files.
+  Future<void> resetCustomSaveFolder() async {
+    await updateSettings(
+      _settings.copyWith(
+        customSaveUri: '',
+        customSaveLabel: '',
+      ),
+    );
+  }
+
   Future<void> updateSettings(VeloceSettings next) async {
+    final prevUri = _settings.customSaveUri.trim();
+    final nextUri = next.customSaveUri.trim();
     final needsRestart = next.deviceName != _settings.deviceName ||
         next.relayHost != _settings.relayHost ||
-        next.exportToDownloads != _settings.exportToDownloads;
+        next.exportToDownloads != _settings.exportToDownloads ||
+        (!Platform.isAndroid &&
+            prevUri != nextUri &&
+            !prevUri.startsWith('content://') &&
+            !nextUri.startsWith('content://'));
+
+    if (prevUri.startsWith('content://') && prevUri != nextUri) {
+      unawaited(_platform.releaseCustomSaveFolder(prevUri));
+    }
+
     _settings = next;
     notifyListeners();
 
@@ -364,6 +467,8 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
       await prefs.setString(_prefRelayHost, next.relayHost);
       await prefs.setBool(_prefExportDownloads, next.exportToDownloads);
       await prefs.setBool(_prefThemeDark, next.themeMode == ThemeMode.dark);
+      await prefs.setString(_prefCustomSaveUri, next.customSaveUri);
+      await prefs.setString(_prefCustomSaveLabel, next.customSaveLabel);
     } catch (_) {
       // Ignore persistence errors in tests.
     }
@@ -447,7 +552,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     try {
       final res = await _bridge.joinSession(
         ticketCode: ticketCode,
-        outputDir: _nodeInfo?.defaultDownloadDir,
+        outputDir: _activeReceiveOutputDir(),
         parallelStreams: 4,
       );
       _transfers[res.transferId] = TransferItem(
@@ -494,7 +599,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     try {
       _bridge.acceptIncomingTransfer(
         transferId: offer.transferId,
-        outputDir: _nodeInfo?.defaultDownloadDir,
+        outputDir: _activeReceiveOutputDir(),
       );
       await _syncActiveTransferGuards();
     } catch (err) {
@@ -691,9 +796,11 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           outputPaths: outputPaths,
         );
         unawaited(_persistHistory());
-        if (direction == 'receive' &&
-            _settings.exportToDownloads &&
-            outputPaths.isNotEmpty) {
+        final shouldExport = direction == 'receive' &&
+            outputPaths.isNotEmpty &&
+            (_settings.customSaveUri.startsWith('content://') ||
+                (!_settings.hasCustomSaveFolder && _settings.exportToDownloads));
+        if (shouldExport) {
           unawaited(_exportCompletedTransfer(transferId, outputPaths));
         }
       case AppEventTransferFailed(:final transferId, :final direction, :final error):
@@ -734,7 +841,17 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     String transferId,
     List<String> outputPaths,
   ) async {
-    final exported = await _platform.exportToPublicDownloads(outputPaths);
+    final treeUri = _settings.customSaveUri.startsWith('content://')
+        ? _settings.customSaveUri.trim()
+        : null;
+    final displayPath =
+        _settings.customSaveLabel.trim().isNotEmpty ? _settings.customSaveLabel.trim() : null;
+    final exported = await _platform.exportToPublicDownloads(
+      outputPaths,
+      customTreeUri: treeUri,
+      customDisplayPath: displayPath,
+      stagingRoot: _nodeInfo?.defaultDownloadDir,
+    );
     final current = _transfers[transferId];
     if (current != null && exported.isNotEmpty) {
       _transfers[transferId] = current.copyWith(outputPaths: exported);
