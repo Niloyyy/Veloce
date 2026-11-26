@@ -192,20 +192,17 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
                       ],
                     ),
                   Expanded(
-                    child: IndexedStack(
-                      index: _tabIndex,
-                      children: [
-                        SendTab(
+                    child: switch (_tabIndex) {
+                      0 => SendTab(
                           controller: _controller,
                           onSwitchToTransfers: () => setState(() => _tabIndex = 2),
                         ),
-                        ReceiveTab(
+                      1 => ReceiveTab(
                           controller: _controller,
                           onJoinedSession: () => setState(() => _tabIndex = 2),
                         ),
-                        TransfersTab(controller: _controller),
-                      ],
-                    ),
+                      _ => TransfersTab(controller: _controller),
+                    },
                   ),
                 ],
               ),

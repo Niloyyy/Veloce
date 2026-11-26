@@ -44,7 +44,7 @@ jobs:
           java-version: "21"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -107,8 +107,9 @@ jobs:
             echo "[veloce] No release keystore secrets configured; signing preview APK with debug key"
           fi
 
-          flutter build apk --release
+          flutter build apk --release --target-platform android-arm64 --tree-shake-icons --split-debug-info=build/symbols --obfuscate
           APK="build/app/outputs/flutter-apk/app-release.apk"
+          ls -lh "${APK}"
           APKSIGNER="$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" -maxdepth 2 -name apksigner 2>/dev/null | sort -V | tail -n 1 || true)"
           if [ -n "${APKSIGNER}" ]; then
             CERT_OUTPUT="$("${APKSIGNER}" verify --verbose --print-certs "${APK}")"
@@ -161,7 +162,7 @@ jobs:
           flutter test
       - name: Build iOS (no-codesign)
         working-directory: mobile
-        run: flutter build ios --release --no-codesign
+        run: flutter build ios --release --no-codesign --tree-shake-icons --split-debug-info=build/ios-symbols --obfuscate
       - name: Verify Rust FFI Symbols Linked in iOS Runner Binary
         working-directory: mobile
         run: |

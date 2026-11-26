@@ -1,5 +1,4 @@
 import { Check, Copy, QrCode, ShieldCheck, Square } from "lucide-react";
-import QRCode from "qrcode";
 import { useEffect, useState } from "react";
 import type { StartSessionResult } from "../types/veloce";
 import { formatBytes } from "../utils/format";
@@ -16,14 +15,17 @@ export function QrCodeCard({ session, hasRelay, onStopSharing }: QrCodeCardProps
 
   useEffect(() => {
     let active = true;
-    QRCode.toDataURL(session.qrUri, {
-      width: 200,
-      margin: 1,
-      color: {
-        dark: "#0f172a",
-        light: "#ffffff",
-      },
-    })
+    import("qrcode")
+      .then((mod) =>
+        mod.toDataURL(session.qrUri, {
+          width: 200,
+          margin: 1,
+          color: {
+            dark: "#0f172a",
+            light: "#ffffff",
+          },
+        }),
+      )
       .then((url) => {
         if (active) setQrDataUrl(url);
       })

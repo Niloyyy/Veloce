@@ -2,6 +2,9 @@ appId: dev.veloce.p2p
 productName: Veloce
 copyright: Copyright © 2026 Veloce Contributors
 asar: true
+compression: maximum
+electronLanguages:
+  - en-US
 
 directories:
   buildResources: build
@@ -10,6 +13,8 @@ directories:
 files:
   - dist/**/*
   - dist-electron/**/*
+  - "!**/*.map"
+  - "!**/*.tsbuildinfo"
   - build/icon.png
   - package.json
 

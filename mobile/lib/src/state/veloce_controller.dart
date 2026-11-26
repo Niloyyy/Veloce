@@ -302,6 +302,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   StreamSubscription<AppEngineEvent>? _eventSub;
   bool _foregroundServiceActive = false;
   bool _disposed = false;
+  int _lastProgressNotifyMs = 0;
 
   void _safeNotifyListeners() {
     if (!_disposed) {
@@ -1106,7 +1107,17 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           etaSeconds: etaSeconds,
           connectionType: connectionType,
           elapsedMs: elapsedMs > 0 ? elapsedMs : (existing?.elapsedMs ?? 0),
+          textContent: existing?.textContent,
         );
+        final wasKnownActive =
+            existing != null && existing.status == TransferStatus.active;
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        if (wasKnownActive &&
+            chunksVerified < totalChunks &&
+            (nowMs - _lastProgressNotifyMs) < 50) {
+          return;
+        }
+        _lastProgressNotifyMs = nowMs;
       case AppEventTransferPaused(:final transferId):
         final existing = _transfers[transferId];
         if (existing != null) {

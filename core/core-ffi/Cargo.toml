@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-napi-addon = ["dep:napi", "dep:napi-derive"]
+napi-addon = ["dep:napi", "dep:napi-derive", "dep:serde_json"]
 
 [dependencies]
 core-protocol = { path = "../core-protocol" }
@@ -20,7 +20,7 @@ hex.workspace = true
 napi = { version = "2.16", default-features = false, features = ["napi8", "async", "tokio_rt", "serde-json"], optional = true }
 napi-derive = { version = "2.16", optional = true }
 serde.workspace = true
-serde_json = "1.0"
+serde_json = { version = "1.0", optional = true }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

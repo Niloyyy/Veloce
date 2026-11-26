@@ -37,10 +37,10 @@ android {
         targetSdk = 35
         versionCode = 3
         versionName = "0.1.2"
+    }
 
-        ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
-        }
+    androidResources {
+        localeFilters += listOf("en")
     }
 
     sourceSets {
@@ -49,10 +49,23 @@ android {
         }
     }
 
-    // Required for Android 15+ 16 KB ELF page-size alignment compliance.
+    // Compress native .so libraries inside the APK (cuts download size by ~60% while
+    // ELF segments remain 16 KB page-aligned via -Wl,-z,max-page-size=16384).
     packaging {
         jniLibs {
-            useLegacyPackaging = false
+            useLegacyPackaging = true
+        }
+        resources {
+            excludes += setOf(
+                "META-INF/*.kotlin_module",
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE*",
+                "META-INF/NOTICE*",
+                "META-INF/AL2.0",
+                "META-INF/LGPL2.1",
+                "DebugProbesKt.bin",
+                "kotlin-tooling-metadata.json",
+            )
         }
     }
 
@@ -74,6 +87,12 @@ android {
 
     buildTypes {
         release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             // Use CI/local release keystore when configured; otherwise fall back to debug
             // signing so CI preview APKs are immediately sideloadable on Android devices.
             signingConfig = if (hasReleaseKeystore) {

@@ -67,16 +67,18 @@ class TransfersTab extends StatelessWidget {
             itemCount: items.length,
             itemBuilder: (context, idx) {
               final item = items[idx];
-              final card = TransferCard(
-                item: item,
-                onPause: () => controller.pauseTransfer(item.transferId),
-                onResume: () => controller.resumeTransfer(item.transferId),
-                onCancel: () => controller.cancelTransfer(item.transferId),
-                onRemove: () => controller.removeTransfer(item.transferId),
-                onRetry: () => controller.resumeTransfer(item.transferId),
-                onOpenFile: () => controller.openTransferFile(item),
-                onOpenFolder: controller.openSaveFolder,
-                onOpenUrl: controller.openExternalUrl,
+              final card = RepaintBoundary(
+                child: TransferCard(
+                  item: item,
+                  onPause: () => controller.pauseTransfer(item.transferId),
+                  onResume: () => controller.resumeTransfer(item.transferId),
+                  onCancel: () => controller.cancelTransfer(item.transferId),
+                  onRemove: () => controller.removeTransfer(item.transferId),
+                  onRetry: () => controller.resumeTransfer(item.transferId),
+                  onOpenFile: () => controller.openTransferFile(item),
+                  onOpenFolder: controller.openSaveFolder,
+                  onOpenUrl: controller.openExternalUrl,
+                ),
               );
               if (!item.isTerminal) {
                 return card;

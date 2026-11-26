@@ -9,7 +9,13 @@ export default defineConfig({
     strictPort: true,
   },
   build: {
+    target: "chrome130",
     outDir: "dist",
     emptyOutDir: true,
+    sourcemap: false,
+    cssMinify: true,
+    modulePreload: {
+      polyfill: false,
+    },
   },
 });

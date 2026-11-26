@@ -15,7 +15,7 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import { useState } from "react";
+import { memo, useState } from "react";
 import type { TransferRecord } from "../types/veloce";
 import { formatBytes, formatDurationMs, formatEta, formatSpeed } from "../utils/format";
 import { extractFirstHttpUrl } from "../utils/textClip";
@@ -52,7 +52,7 @@ function SpeedSparkline({ samples }: { samples: number[] }) {
   );
 }
 
-export function TransferCard({
+export const TransferCard = memo(function TransferCard({
   transfer,
   onPause,
   onResume,
@@ -306,4 +306,4 @@ export function TransferCard({
       {transfer.error && <p className="transfer-error">{transfer.error}</p>}
     </div>
   );
-}
+});

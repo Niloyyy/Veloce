@@ -8,7 +8,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { IncomingOfferModal } from "./components/IncomingOfferModal";
 import { ReceiveView } from "./components/ReceiveView";
 import { SendView } from "./components/SendView";
@@ -107,6 +107,10 @@ export function App() {
 
   const trustedPeersRef = useRef<TrustedPeer[]>(settings.trustedPeers);
   const outputDirRef = useRef<string>(outputDir);
+  const pendingProgressRef = useRef<
+    Map<string, Extract<EngineEvent, { type: "TransferProgress" }>>
+  >(new Map());
+  const progressRafRef = useRef<number | null>(null);
 
   useEffect(() => {
     trustedPeersRef.current = settings.trustedPeers;
@@ -115,6 +119,14 @@ export function App() {
   useEffect(() => {
     outputDirRef.current = outputDir;
   }, [outputDir]);
+
+  useEffect(() => {
+    return () => {
+      if (progressRafRef.current !== null) {
+        cancelAnimationFrame(progressRafRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -221,34 +233,49 @@ export function App() {
         });
         break;
       case "TransferProgress":
-        setTransfers((prev) => {
-          const existing = prev[evt.transferId];
-          const history = [...(existing?.speedHistory ?? []), evt.speedBytesPerSec].slice(-24);
-          return {
-            ...prev,
-            [evt.transferId]: {
-              transferId: evt.transferId,
-              label:
-                existing?.label ??
-                (evt.direction === "send"
-                  ? `Sending #${evt.transferId}`
-                  : `Receiving #${evt.transferId}`),
-              direction: evt.direction,
-              status: "active",
-              bytesTransferred: evt.bytesTransferred,
-              totalBytes: evt.totalBytes,
-              chunksVerified: evt.chunksVerified,
-              totalChunks: evt.totalChunks,
-              speedBytesPerSec: evt.speedBytesPerSec,
-              speedHistory: history,
-              etaSeconds: evt.etaSeconds,
-              elapsedMs: evt.elapsedMs > 0 ? evt.elapsedMs : existing?.elapsedMs,
-              connectionType: evt.connectionType,
-            },
-          };
-        });
+        pendingProgressRef.current.set(evt.transferId, evt);
+        if (progressRafRef.current === null) {
+          progressRafRef.current = requestAnimationFrame(() => {
+            progressRafRef.current = null;
+            const batch = Array.from(pendingProgressRef.current.values());
+            pendingProgressRef.current.clear();
+            if (batch.length === 0) return;
+            setTransfers((prev) => {
+              const next = { ...prev };
+              for (const p of batch) {
+                const existing = next[p.transferId];
+                const history = [
+                  ...(existing?.speedHistory ?? []),
+                  p.speedBytesPerSec,
+                ].slice(-24);
+                next[p.transferId] = {
+                  transferId: p.transferId,
+                  label:
+                    existing?.label ??
+                    (p.direction === "send"
+                      ? `Sending #${p.transferId}`
+                      : `Receiving #${p.transferId}`),
+                  direction: p.direction,
+                  status: "active",
+                  bytesTransferred: p.bytesTransferred,
+                  totalBytes: p.totalBytes,
+                  chunksVerified: p.chunksVerified,
+                  totalChunks: p.totalChunks,
+                  speedBytesPerSec: p.speedBytesPerSec,
+                  speedHistory: history,
+                  etaSeconds: p.etaSeconds,
+                  elapsedMs: p.elapsedMs > 0 ? p.elapsedMs : existing?.elapsedMs,
+                  connectionType: p.connectionType,
+                  textContent: existing?.textContent,
+                };
+              }
+              return next;
+            });
+          });
+        }
         break;
       case "TransferPaused":
+        pendingProgressRef.current.delete(evt.transferId);
         setTransfers((prev) => {
           const existing = prev[evt.transferId];
           if (!existing) return prev;
@@ -278,6 +305,7 @@ export function App() {
         });
         break;
       case "TransferCompleted": {
+        pendingProgressRef.current.delete(evt.transferId);
         const isReceivedTextClip =
           evt.direction === "receive" &&
           evt.outputPaths.length === 1 &&
@@ -337,6 +365,7 @@ export function App() {
         break;
       }
       case "TransferFailed":
+        pendingProgressRef.current.delete(evt.transferId);
         setTransfers((prev) => {
           const existing = prev[evt.transferId];
           const isCancel = evt.error.toLowerCase().includes("cancel");
@@ -474,23 +503,23 @@ export function App() {
     }
   };
 
-  const handleOpenFile = async (filePath: string) => {
+  const handleOpenFile = useCallback(async (filePath: string) => {
     const err = await window.veloce?.openPath(filePath);
     if (err) {
       setBannerError(`Could not open file: ${err}`);
     }
-  };
+  }, []);
 
-  const handleShowInFolder = async (filePath: string) => {
+  const handleShowInFolder = useCallback(async (filePath: string) => {
     const ok = await window.veloce?.showInFolder(filePath);
     if (ok === false) {
       setBannerError("File no longer exists at its saved location.");
     }
-  };
+  }, []);
 
-  const handleOpenUrl = async (url: string) => {
+  const handleOpenUrl = useCallback(async (url: string) => {
     await window.veloce?.openExternalUrl(url);
-  };
+  }, []);
 
   const handleStopSharing = async () => {
     if (!activeSession) return;
@@ -615,11 +644,11 @@ export function App() {
     await window.veloce?.rejectIncoming({ transferId: offer.transferId });
   };
 
-  const handlePauseTransfer = async (transferId: string) => {
+  const handlePauseTransfer = useCallback(async (transferId: string) => {
     await window.veloce?.pauseTransfer(transferId);
-  };
+  }, []);
 
-  const handleResumeTransfer = async (transferId: string) => {
+  const handleResumeTransfer = useCallback(async (transferId: string) => {
     setBannerError(null);
     try {
       const ok = await window.veloce?.resumeTransfer(transferId);
@@ -636,13 +665,11 @@ export function App() {
     } catch (err) {
       setBannerError(humanizeError(err));
     }
-  };
+  }, []);
 
-  const handleCancelTransfer = async (transferId: string) => {
+  const handleCancelTransfer = useCallback(async (transferId: string) => {
     await window.veloce?.cancelTransfer(transferId);
-    if (activeSession?.transferId === transferId) {
-      setActiveSession(null);
-    }
+    setActiveSession((prev) => (prev?.transferId === transferId ? null : prev));
     setTransfers((prev) => {
       const existing = prev[transferId];
       if (!existing) return prev;
@@ -656,22 +683,20 @@ export function App() {
         },
       };
     });
-  };
+  }, []);
 
-  const handleRemoveTransfer = async (transferId: string) => {
-    const existing = transfers[transferId];
-    if (existing && (existing.status === "active" || existing.status === "paused")) {
-      await window.veloce?.cancelTransfer(transferId);
-    }
-    if (activeSession?.transferId === transferId) {
-      setActiveSession(null);
-    }
+  const handleRemoveTransfer = useCallback(async (transferId: string) => {
     setTransfers((prev) => {
+      const existing = prev[transferId];
+      if (existing && (existing.status === "active" || existing.status === "paused")) {
+        void window.veloce?.cancelTransfer(transferId);
+      }
       const next = { ...prev };
       delete next[transferId];
       return next;
     });
-  };
+    setActiveSession((prev) => (prev?.transferId === transferId ? null : prev));
+  }, []);
 
   const handleClearHistory = () => {
     setTransfers((prev) => {
