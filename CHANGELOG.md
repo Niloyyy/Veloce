@@ -2,6 +2,25 @@
 
 All notable changes to Veloce are documented in this file.
 
+## [0.1.3] - 2026-11-27
+
+### Added
+- **Quick Text & Link Beam (`veloce-clip-message.txt`):**
+  - Instant cross-platform text snippet and URL sharing (up to 256 KB) over both 1-click LAN peer push and Global QR / `veloce1...` tickets across Mobile and Desktop, auto-consumed into Copy / Open Link cards without cluttering `Downloads`.
+- **Persistent Ed25519 Identity & Trusted Auto-Accept:**
+  - Persistent Ed25519 identity keypairs (`PeerIdentity::load_or_generate`) across restarts with mTLS-verified `NodeId` trust pinning, zero-prompt auto-accept for trusted devices, per-peer shield toggles, `"Trust ..."` option on incoming offers, and Settings management.
+- **Custom Save Folders & Open / Reveal Received Files:**
+  - Persistent custom save folder picker on Mobile (Android SAF `ACTION_OPEN_DOCUMENT_TREE` + iOS folder picker) across Settings, Receive, and Incoming Offer sheets, plus one-tap **Open** and **Show in Folder** actions on completed received files across Desktop and Mobile.
+- **Auto-Detected Hardware Model Names, 6 Curated Themes & Chunk-Start Timer:**
+  - Auto-detected hardware/model names across Android (`Settings.Global.DEVICE_NAME` / `Build.MODEL`), iOS (`utsname.machine` mapping), Desktop (`DMI` / `ioreg` / BIOS registry), and CLI with one-click header rename and reset-to-model.
+  - 6 curated themes (`Obsidian`, `Daylight`, `Midnight OLED`, `Nord Frost`, `Emerald`, `Sunset Ember`) and `OnceLock<Instant>` chunk-start elapsed transfer timer (`Took <duration>`) across Mobile and Desktop.
+
+### Changed
+- **85% Smaller Android APK & Optimized Binary / UI Bundles:**
+  - Reduced the V2-signed Android release APK from **80.9 MB** (`v0.1.2`) down to **12.2 MB** (**6.6× smaller**) via DEFLATE native `.so` packaging (`useLegacyPackaging = true` while preserving 16 KB ELF segment alignment), unbundled Google Play Services MLKit barcode scanning, `arm64-v8a` phone targeting, R8 full-mode code/resource shrinking, and Dart AOT icon tree-shaking + debug-symbol splitting + obfuscation on Android & iOS.
+  - Configured Cargo `[profile.release]` (`opt-level = "s"`, `lto = "thin"`, `codegen-units = 1`, `strip = "symbols"`) while keeping `opt-level = 3` on hot data-path crates (`blake3`, `core-storage`, `core-transport`, `quinn-proto`) and gating `serde_json` behind `napi-addon`, cutting `veloce` CLI by **32%** and `veloce-relay` by **29%**.
+  - Stripped 54 unused Electron Chromium locales (`electronLanguages: [en-US]`) with maximum compression, dynamically code-split `qrcode` in Vite, and optimized Flutter & React UI rendering (`RepaintBoundary`, active-tab rendering, 50 ms / `requestAnimationFrame` progress coalescing, `React.memo`).
+
 ## [0.1.2] - 2026-11-26
 
 ### Added

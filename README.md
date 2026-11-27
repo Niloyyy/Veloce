@@ -96,9 +96,9 @@ Download the latest CI-built Android APK from the **Mobile & Core CI** workflow 
 cd mobile && flutter pub get && cd ..
 flutter_rust_bridge_codegen generate
 
-# 2. Android (arm64-v8a + x86_64, 16 KB ELF page-aligned for Android 15+)
+# 2. Android (arm64-v8a, 16 KB ELF page-aligned for Android 15+)
 bash mobile/scripts/build-android-rust.sh release
-cd mobile && flutter build apk --release
+cd mobile && flutter build apk --release --target-platform android-arm64 --tree-shake-icons --split-debug-info=build/symbols --obfuscate
 
 # 3. iOS (aarch64-apple-ios static XCFramework linked with symbol preservation)
 bash mobile/scripts/build-ios-rust.sh
