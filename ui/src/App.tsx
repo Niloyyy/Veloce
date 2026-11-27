@@ -3,7 +3,6 @@ import {
   ArrowUpRight,
   Palette,
   Pencil,
-  Shield,
   SlidersHorizontal,
   Trash2,
   X,
@@ -37,8 +36,8 @@ function humanizeError(raw: unknown): string {
   const msg = raw instanceof Error ? raw.message : String(raw);
   if (msg.includes("could not reach peer directly or via any configured relay")) {
     return (
-      "Could not reach sender over LAN or Direct P2P. Ensure the sender still has Veloce open, " +
-      "or configure a Veloce Relay server (host:port) in Settings for cellular / strict NAT networks."
+      "Could not connect to sender. Make sure the sender still has Veloce open, " +
+      "or add a Relay Server under Settings → Advanced for strict mobile networks."
     );
   }
   return msg;
@@ -202,8 +201,8 @@ export function App() {
             [evt.transferId]: {
               transferId: evt.transferId,
               label: isTextClip
-                ? `Quick Text from ${evt.senderName}`
-                : `Auto-accepted from ${evt.senderName} (${evt.fileCount} item(s))`,
+                ? `Text from ${evt.senderName}`
+                : `From ${evt.senderName} (${evt.fileCount} ${evt.fileCount === 1 ? "file" : "files"})`,
               direction: "receive",
               status: "active",
               bytesTransferred: 0,
@@ -260,9 +259,7 @@ export function App() {
                   transferId: p.transferId,
                   label:
                     existing?.label ??
-                    (p.direction === "send"
-                      ? `Sending #${p.transferId}`
-                      : `Receiving #${p.transferId}`),
+                    (p.direction === "send" ? "Sending files" : "Receiving files"),
                   direction: p.direction,
                   status: "active",
                   bytesTransferred: p.bytesTransferred,
@@ -329,9 +326,7 @@ export function App() {
               transferId: evt.transferId,
               label:
                 existing?.label ??
-                (evt.direction === "send"
-                  ? `Sent #${evt.transferId}`
-                  : `Received #${evt.transferId}`),
+                (evt.direction === "send" ? "Sent files" : "Received files"),
               direction: evt.direction,
               status: "completed",
               bytesTransferred: evt.totalBytes,
@@ -385,7 +380,7 @@ export function App() {
             ...prev,
             [evt.transferId]: {
               transferId: evt.transferId,
-              label: existing?.label ?? `Transfer #${evt.transferId}`,
+              label: existing?.label ?? "Transfer",
               direction: evt.direction,
               status: isCancel ? "cancelled" : "failed",
               bytesTransferred: existing?.bytesTransferred ?? 0,
@@ -598,7 +593,7 @@ export function App() {
         ...prev,
         [res.transferId]: {
           transferId: res.transferId,
-          label: `${res.fileCount} item(s) via Global Ticket`,
+          label: `${res.fileCount} ${res.fileCount === 1 ? "file" : "files"}`,
           direction: "receive",
           status: "active",
           bytesTransferred: 0,
@@ -679,8 +674,8 @@ export function App() {
       [offer.transferId]: {
         transferId: offer.transferId,
         label: isTextClip
-          ? `Quick Text from ${offer.senderName}`
-          : `From ${offer.senderName} (${offer.fileCount} item(s))`,
+          ? `Text from ${offer.senderName}`
+          : `From ${offer.senderName} (${offer.fileCount} ${offer.fileCount === 1 ? "file" : "files"})`,
         direction: "receive",
         status: "active",
         bytesTransferred: 0,
@@ -781,12 +776,9 @@ export function App() {
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">
-            <VeloceLogo size={34} />
+            <VeloceLogo size={32} />
           </div>
-          <div>
-            <h1>Veloce</h1>
-            <span className="muted-xs">Local &amp; Global P2P</span>
-          </div>
+          <h1>Veloce</h1>
         </div>
 
         <nav className="tab-bar" role="tablist" aria-label="Transfer mode">
@@ -817,12 +809,11 @@ export function App() {
             <button
               type="button"
               className="node-chip node-chip-btn"
-              title={`Click to rename device • Node ID: ${status.nodeInfo.nodeId}`}
+              title={`Visible on Wi-Fi as "${status.nodeInfo.deviceName}" (click to rename)`}
               onClick={() => setSettingsOpen(true)}
             >
-              <Shield size={13} />
+              <span className="online-dot" />
               <span>{status.nodeInfo.deviceName}</span>
-              <code>{status.nodeInfo.shortId}</code>
               <Pencil size={11} className="node-chip-edit" />
             </button>
           )}
@@ -830,7 +821,7 @@ export function App() {
             className="icon-btn"
             type="button"
             aria-label={`Switch theme (current: ${themeLabel(theme)})`}
-            title={`Theme: ${themeLabel(theme)} (click to cycle)`}
+            title={`Theme: ${themeLabel(theme)}`}
             onClick={handleToggleTheme}
           >
             <Palette size={16} />
@@ -897,15 +888,12 @@ export function App() {
           <div className="panel telemetry-panel">
             <div className="panel-header">
               <div className="panel-title-inline">
-                <h3>Transfers</h3>
+                <h3>Activity</h3>
                 {activeCount > 0 && (
                   <span className="count-badge">{activeCount} active</span>
                 )}
               </div>
               <div className="panel-header-actions">
-                {transferList.length > 0 && (
-                  <span className="muted-xs">{transferList.length} total</span>
-                )}
                 {hasFinishedTransfers && (
                   <button
                     className="btn-secondary btn-sm"
@@ -922,10 +910,10 @@ export function App() {
 
             {transferList.length === 0 ? (
               <div className="empty-telemetry-box">
-                <p className="muted-sm">No transfers yet</p>
+                <p className="muted-sm">No recent transfers</p>
                 <span className="muted-xs">
-                  Live throughput, missing-chunk resume progress, and BLAKE3 verification appear
-                  here automatically.
+                  Files and links you send or receive will appear here with live speed and one-click
+                  open.
                 </span>
               </div>
             ) : (
@@ -962,6 +950,7 @@ export function App() {
       {settingsOpen && (
         <SettingsModal
           settings={settings}
+          nodeId={status?.nodeInfo?.nodeId}
           detectedDeviceName={status?.detectedDeviceName}
           saving={savingSettings}
           onPreviewTheme={(nextTheme) => setTheme(nextTheme)}

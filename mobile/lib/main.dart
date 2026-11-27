@@ -135,9 +135,18 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
                                 Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
+                                    Container(
+                                      width: 7,
+                                      height: 7,
+                                      margin: const EdgeInsets.only(right: 5),
+                                      decoration: const BoxDecoration(
+                                        color: Color(0xFF10B981),
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
                                     Flexible(
                                       child: Text(
-                                        '${_controller.nodeInfo!.deviceName} • ${_controller.nodeInfo!.shortId}',
+                                        _controller.nodeInfo!.deviceName,
                                         overflow: TextOverflow.ellipsis,
                                         style: Theme.of(innerCtx).textTheme.labelSmall,
                                       ),

@@ -239,11 +239,13 @@ export const TransferCard = memo(function TransferCard({
               </span>
             </>
           )}
-          <span className="chunk-status">
+          <span className="chunk-status" title={`${transfer.chunksVerified} / ${transfer.totalChunks} chunks verified`}>
             <ShieldCheck size={13} />
-            {transfer.chunksVerified} / {transfer.totalChunks} chunks verified
+            {transfer.status === "completed"
+              ? "Verified"
+              : `${Math.round(pct)}%`}
             {transfer.initialChunksVerified && transfer.initialChunksVerified > 0
-              ? ` • ${transfer.initialChunksVerified} resumed`
+              ? " • Resumed"
               : ""}
           </span>
         </div>

@@ -1,10 +1,19 @@
-import { FolderOpen, RotateCcw, ShieldCheck, SlidersHorizontal, Trash2, X } from "lucide-react";
+import {
+  ChevronDown,
+  FolderOpen,
+  RotateCcw,
+  ShieldCheck,
+  SlidersHorizontal,
+  Trash2,
+  X,
+} from "lucide-react";
 import { useState } from "react";
 import type { DesktopSettings, ThemeId, TrustedPeer } from "../types/veloce";
 import { THEME_OPTIONS } from "../utils/themes";
 
 interface SettingsModalProps {
   settings: DesktopSettings;
+  nodeId?: string;
   detectedDeviceName?: string;
   saving: boolean;
   onPreviewTheme: (theme: ThemeId) => void;
@@ -15,6 +24,7 @@ interface SettingsModalProps {
 
 export function SettingsModal({
   settings,
+  nodeId,
   detectedDeviceName,
   saving,
   onPreviewTheme,
@@ -31,6 +41,7 @@ export function SettingsModal({
     settings.runInBackground ?? true,
   );
   const [trustedPeers, setTrustedPeers] = useState<TrustedPeer[]>(settings.trustedPeers ?? []);
+  const [advancedOpen, setAdvancedOpen] = useState(settings.relayAddrs.length > 0);
   const [error, setError] = useState<string | null>(null);
 
   const handleBrowse = async () => {
@@ -87,7 +98,6 @@ export function SettingsModal({
       <div className="modal-card modal-card-wide">
         <div className="modal-header">
           <div className="modal-title-stack">
-            <span className="eyebrow">Node &amp; Transfer Preferences</span>
             <h2 id="settings-modal-title" className="settings-title-row">
               <SlidersHorizontal size={18} />
               <span>Settings</span>
@@ -116,10 +126,10 @@ export function SettingsModal({
                   className="btn-link-reset"
                   onClick={() => setDeviceName(detectedDeviceName)}
                   disabled={saving}
-                  title={`Reset to detected model (${detectedDeviceName})`}
+                  title={`Reset to ${detectedDeviceName}`}
                 >
                   <RotateCcw size={12} />
-                  <span>Reset to model</span>
+                  <span>Reset</span>
                 </button>
               )}
             </div>
@@ -130,18 +140,14 @@ export function SettingsModal({
               maxLength={64}
               value={deviceName}
               onChange={(e) => setDeviceName(e.target.value)}
-              placeholder={detectedDeviceName || "Advertised over mDNS and TLS handshake"}
+              placeholder={detectedDeviceName || "My Computer"}
             />
-            {detectedDeviceName && (
-              <span className="field-hint">
-                Shown to nearby peers &amp; transfer offers • Detected model: {detectedDeviceName}
-              </span>
-            )}
+            <span className="field-hint">Shown to nearby phones and computers.</span>
           </div>
 
           <div className="field-group">
             <label className="input-label" htmlFor="veloce-download-dir">
-              Default Download Directory
+              Save Folder
             </label>
             <div className="dir-picker-row dir-picker-compact">
               <span id="veloce-download-dir" className="muted-xs truncate" title={downloadDir}>
@@ -159,27 +165,10 @@ export function SettingsModal({
             </div>
           </div>
 
-          <label className="trust-checkbox-row" htmlFor="veloce-bg-mode">
-            <input
-              id="veloce-bg-mode"
-              type="checkbox"
-              checked={runInBackground}
-              onChange={(e) => setRunInBackground(e.target.checked)}
-              disabled={saving}
-            />
-            <div>
-              <strong>Keep running in background (System Tray)</strong>
-              <div className="field-hint">
-                Closing the window hides Veloce to the system tray so nearby devices &amp; global
-                transfers stay reachable anytime.
-              </div>
-            </div>
-          </label>
-
           <div className="field-group">
             <div className="field-label-row">
-              <span className="input-label">Appearance Theme</span>
-              <span className="muted-xs">Live preview enabled</span>
+              <span className="input-label">Theme</span>
+              <span className="muted-xs">Click to preview live</span>
             </div>
             <div className="theme-picker-grid">
               {THEME_OPTIONS.map((opt) => (
@@ -204,52 +193,28 @@ export function SettingsModal({
             </div>
           </div>
 
-          <div className="field-group">
-            <label className="input-label" htmlFor="veloce-relay-addrs">
-              Relay Addresses (optional host:port)
-            </label>
+          <label className="trust-checkbox-row" htmlFor="veloce-bg-mode">
             <input
-              id="veloce-relay-addrs"
-              className="text-input text-input-mono"
-              type="text"
-              value={relayText}
-              onChange={(e) => setRelayText(e.target.value)}
-              placeholder="relay.example.com:7878, 203.0.113.10:7878"
+              id="veloce-bg-mode"
+              type="checkbox"
+              checked={runInBackground}
+              onChange={(e) => setRunInBackground(e.target.checked)}
+              disabled={saving}
             />
-            <span className="field-hint">
-              Native IPv6, UPnP/NAT-PMP, STUN, and Tailscale/ZeroTier work free with no relay; add
-              a self-hosted veloce-relay only when both peers are on IPv4-only symmetric CGNAT.
-            </span>
-          </div>
-
-          <div className="field-group">
-            <div className="range-header">
-              <label className="input-label" htmlFor="veloce-parallel-streams">
-                Parallel Streams
-              </label>
-              <span className="range-value">{parallelStreams} streams</span>
+            <div>
+              <strong>Keep running in background</strong>
+              <div className="field-hint">
+                Stay in the system tray when closed so you can receive files anytime.
+              </div>
             </div>
-            <input
-              id="veloce-parallel-streams"
-              className="range-input"
-              type="range"
-              min={1}
-              max={32}
-              step={1}
-              value={parallelStreams}
-              onChange={(e) => setParallelStreams(Number(e.target.value))}
-            />
-            <span className="field-hint">
-              Recommended: 8 for LAN/WAN, 4 for low-power links, 16–32 for high-latency fiber.
-            </span>
-          </div>
+          </label>
 
           <div className="field-group">
-            <span className="input-label">Trusted Devices (Auto-Accept)</span>
+            <span className="input-label">Trusted Devices</span>
             {trustedPeers.length === 0 ? (
               <span className="field-hint">
-                No trusted devices yet. Click the shield icon on a nearby device or check
-                &ldquo;Trust&rdquo; on an incoming offer to auto-accept transfers silently.
+                None yet. Click the shield icon on a nearby device to accept its files
+                automatically without a prompt.
               </span>
             ) : (
               <ul className="trusted-list">
@@ -258,7 +223,6 @@ export function SettingsModal({
                     <div className="trusted-list-info">
                       <ShieldCheck size={14} className="trusted-icon" />
                       <strong>{peer.deviceName}</strong>
-                      <code>{peer.shortId}</code>
                     </div>
                     <button
                       type="button"
@@ -278,6 +242,67 @@ export function SettingsModal({
             )}
           </div>
 
+          <div className="advanced-section">
+            <button
+              type="button"
+              className="advanced-toggle-btn"
+              onClick={() => setAdvancedOpen((v) => !v)}
+              aria-expanded={advancedOpen}
+            >
+              <span>Advanced Network Options</span>
+              <ChevronDown
+                size={15}
+                className={`chevron-icon ${advancedOpen ? "chevron-open" : ""}`}
+              />
+            </button>
+
+            {advancedOpen && (
+              <div className="advanced-body">
+                <div className="field-group">
+                  <label className="input-label" htmlFor="veloce-relay-addrs">
+                    Relay Server (optional)
+                  </label>
+                  <input
+                    id="veloce-relay-addrs"
+                    className="text-input text-input-mono"
+                    type="text"
+                    value={relayText}
+                    onChange={(e) => setRelayText(e.target.value)}
+                    placeholder="relay.example.com:7878"
+                  />
+                  <span className="field-hint">
+                    Only needed if two devices on strict mobile networks cannot connect directly.
+                  </span>
+                </div>
+
+                <div className="field-group">
+                  <div className="range-header">
+                    <label className="input-label" htmlFor="veloce-parallel-streams">
+                      Parallel Connections
+                    </label>
+                    <span className="range-value">{parallelStreams}</span>
+                  </div>
+                  <input
+                    id="veloce-parallel-streams"
+                    className="range-input"
+                    type="range"
+                    min={1}
+                    max={32}
+                    step={1}
+                    value={parallelStreams}
+                    onChange={(e) => setParallelStreams(Number(e.target.value))}
+                  />
+                </div>
+
+                {nodeId && (
+                  <div className="field-hint">
+                    Device Key ID: <code>{nodeId.slice(0, 16)}…</code>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           {error && <div className="inline-error">{error}</div>}
 
           <div className="modal-actions">
@@ -290,7 +315,7 @@ export function SettingsModal({
               Cancel
             </button>
             <button className="btn-primary" type="submit" disabled={saving}>
-              {saving ? "Applying..." : "Save & Apply"}
+              {saving ? "Saving..." : "Save & Apply"}
             </button>
           </div>
         </form>

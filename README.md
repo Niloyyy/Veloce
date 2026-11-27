@@ -155,9 +155,9 @@ cargo run --release -p veloce-bench -- \
 
 | Scenario | Transport | Total Throughput | Steady-State Throughput | Notes |
 | :--- | :--- | ---: | ---: | :--- |
-| **Clean LAN Loopback** (64 MiB, 0 ms RTT, 0% loss) | **Veloce QUIC (BBR, 8 streams)** | **155.55 MB/s** (`0.41 s`) | **188.24 MB/s** (>1.5 Gbps) | Full Ed25519 mTLS 1.3 + BLAKE3 Merkle + disk write & `fsync` |
-| **Clean LAN Loopback** (64 MiB, 0 ms RTT, 0% loss) | Single-Stream TCP (Kernel) | 2,833.47 MB/s | 2,843.00 MB/s | Unencrypted memory-to-memory kernel loopback baseline |
-| **Impaired WAN LFN** (8 MiB, 100 ms RTT, 1% loss) | **Veloce QUIC (BBR, 8 streams)** | **3.23 MB/s** | **5.01 MB/s** | 83 packet drops; full Merkle verified (`24.51x` faster than TCP) |
+| **Clean LAN Loopback** (256 MiB, 0 ms RTT, 0% loss) | **Veloce LAN mTLS 1.3 + BLAKE3** | **524.52 MB/s** (`0.49 s`) | **810.13 MB/s** (~6.5 Gbps) | Full Ed25519 mTLS 1.3 + parallel BLAKE3 (`19 ms`) + disk write & `fsync` |
+| **Clean LAN Loopback** (256 MiB, 0 ms RTT, 0% loss) | Single-Stream TCP (Kernel) | 1,754.22 MB/s | 1,754.99 MB/s | Unencrypted memory-to-memory kernel loopback baseline |
+| **Impaired WAN LFN** (16 MiB, 100 ms RTT, 1% loss) | **Veloce QUIC (BBR, 8 streams)** | **7.70 MB/s** | **14.34 MB/s** | Packet drops recovered seamlessly; full Merkle verified (**`71.13x`** faster than TCP) |
 | **Impaired WAN LFN** (100 ms RTT, 1% loss) | Single-Stream TCP (Empirical Proxy) | 0.20 MB/s | 0.20 MB/s | 2.46 MiB in 12.0 s cap, 16 drops (HoL congestion stall) |
 
 ### Linux Kernel `tc netem` Benchmark (Root Mode)

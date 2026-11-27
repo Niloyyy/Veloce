@@ -160,8 +160,9 @@ class TransferCard extends StatelessWidget {
                           ),
                           const SizedBox(width: 4),
                           Text(
-                            '${item.chunksVerified}/${item.totalChunks} chunks'
-                            '${item.initialChunksVerified > 0 ? ' (${item.initialChunksVerified} resumed)' : ''}',
+                            item.status == TransferStatus.completed
+                                ? 'Verified${item.initialChunksVerified > 0 ? ' • Resumed' : ''}'
+                                : '${(item.progress * 100).round()}%${item.initialChunksVerified > 0 ? ' • Resumed' : ''}',
                             style: Theme.of(context)
                                 .textTheme
                                 .labelSmall

@@ -49,7 +49,7 @@ class _IncomingOfferSheetState extends State<IncomingOfferSheet> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        isTextClip ? 'INCOMING QUICK TEXT / LINK' : 'INCOMING TRANSFER',
+                        isTextClip ? 'INCOMING TEXT / LINK' : 'INCOMING FILES',
                         style: Theme.of(context).textTheme.labelSmall?.copyWith(
                               color: Theme.of(context).colorScheme.primary,
                               fontWeight: FontWeight.w700,
@@ -61,10 +61,6 @@ class _IncomingOfferSheetState extends State<IncomingOfferSheet> {
                         offer.senderName,
                         style: Theme.of(context).textTheme.titleLarge,
                       ),
-                      Text(
-                        'Node ID: ${offer.senderShortId}',
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
                     ],
                   ),
                 ),
@@ -74,8 +70,8 @@ class _IncomingOfferSheetState extends State<IncomingOfferSheet> {
             const SizedBox(height: 14),
             Text(
               isTextClip
-                  ? 'Quick Text / Link • ${formatBytes(offer.totalSize)} • End-to-End TLS 1.3'
-                  : '${offer.fileCount} item(s) • ${formatBytes(offer.totalSize)} • End-to-End TLS 1.3',
+                  ? 'Text / Link • ${formatBytes(offer.totalSize)} • Encrypted'
+                  : '${offer.fileCount} ${offer.fileCount == 1 ? 'file' : 'files'} • ${formatBytes(offer.totalSize)} • Encrypted',
               style: Theme.of(context).textTheme.bodyMedium,
             ),
             if (!isTextClip) ...[
@@ -160,9 +156,9 @@ class _IncomingOfferSheetState extends State<IncomingOfferSheet> {
               dense: true,
               value: _trustSender,
               onChanged: (v) => setState(() => _trustSender = v ?? false),
-              title: Text('Trust ${offer.senderName}'),
-              subtitle: Text(
-                'Auto-accept future transfers verified by key ${offer.senderShortId}',
+              title: Text('Always accept from ${offer.senderName}'),
+              subtitle: const Text(
+                'Future transfers from this device will start automatically',
               ),
             ),
             const SizedBox(height: 12),

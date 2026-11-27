@@ -2,6 +2,21 @@
 
 All notable changes to Veloce are documented in this file.
 
+## [0.1.4] - 2026-11-27
+
+### Added
+- **Kernel-Offloaded Ed25519 mTLS 1.3 LAN Data Lane (`810 MB/s` LAN Throughput):**
+  - Added `LanTcpLane` multiplexed on the exact same port as `MagicUdpSocket`, pairing Ed25519 mutual TLS 1.3 (`TLS13_AES_128_GCM_SHA256` prioritized first) with kernel TCP TSO/GRO and `256 KiB` super-writes (`4` syscalls/MiB instead of `720`), boosting steady-state LAN throughput to **810.13 MB/s** (`524.52 MB/s` end-to-end with multi-core BLAKE3 indexing & `fsync`) while automatically falling back to multi-stream QUIC (BBR) (`14.34 MB/s` / `71.13x` TCP on `100 ms` RTT, `1%` loss WAN).
+- **Automatic Cross-Session Missing-Chunk Deduplication & Auto-Reconnect:**
+  - Interrupted or cancelled transfers now resume automatically even when the sender starts a **brand-new session** later for the same file(s), skipping all previously verified `.part` chunks as well as already-finalized destination files in multi-file batches, and reconnecting automatically on transient mid-transfer packet/network drops.
+- **Sub-Second (`~1s`) Nearby LAN Device Sync:**
+  - Paired mDNS with a `750 ms` UDP LAN presence beacon (`Hello`/`Goodbye`), dynamic Wi-Fi/cellular interface transition tracking, and active unicast `HolePunchProbe` liveness checks so devices joining Wi-Fi or switching to Mobile Data update Nearby Device lists within ~1 second.
+- **Desktop System Tray Background Mode:**
+  - Closing the desktop window keeps Veloce running in the system tray (configurable in Settings & tray menu) with single-instance focus lock, `powerSaveBlocker` during active transfers, silent background auto-accept for Trusted Devices, and automatic window wakeup/notification on untrusted offers.
+- **Clean, User-Friendly UI, Live Theme Preview, & Per-File Unselect (`×`):**
+  - Simplified Desktop and Mobile UIs with plain, jargon-free language, live theme preview on swatch tap/click, staged file selection with per-file `×` unselect + `+ Files` / `Clear`, dedicated **Send Anywhere (Create Share Code)** workflow, compact expandable text/link bar, and collapsible **Advanced Network Options**.
+  - Added Android `WIFI_MODE_FULL_LOW_LATENCY` transfer locks and `<1 ms` zero-copy atomic `renameTo` export to `Downloads/Veloce` on Android 11+.
+
 ## [0.1.3] - 2026-11-27
 
 ### Added

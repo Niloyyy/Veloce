@@ -30,12 +30,11 @@ export function IncomingOfferModal({
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="modal-card">
         <div className="modal-header">
-          <div>
+          <div className="modal-title-stack">
             <span className="eyebrow">
-              {isTextClip ? "Incoming Quick Text / Link" : "Incoming Transfer Request"}
+              {isTextClip ? "Incoming Text / Link" : "Incoming Files"}
             </span>
             <h2>{offer.senderName}</h2>
-            <span className="muted-xs">Node ID: {offer.senderShortId}</span>
           </div>
           <ConnectionBadge type={offer.connectionType} />
         </div>
@@ -44,17 +43,19 @@ export function IncomingOfferModal({
           {isTextClip ? (
             <span className="panel-title-inline">
               <MessageSquareText size={15} />
-              <strong>Quick Text / Link</strong> • {formatBytes(offer.totalSize)}
+              <strong>Text / Link</strong> • {formatBytes(offer.totalSize)}
             </span>
           ) : (
             <span>
-              <strong>{offer.fileCount}</strong> item(s) •{" "}
-              <strong>{formatBytes(offer.totalSize)}</strong>
+              <strong>
+                {offer.fileCount} {offer.fileCount === 1 ? "file" : "files"}
+              </strong>{" "}
+              • <strong>{formatBytes(offer.totalSize)}</strong>
             </span>
           )}
           <span className="merkle-pill">
             <ShieldCheck size={13} />
-            End-to-End TLS 1.3
+            Encrypted
           </span>
         </div>
 
@@ -68,7 +69,7 @@ export function IncomingOfferModal({
                 </li>
               ))}
               {offer.files.length > 6 && (
-                <li className="muted-xs">+ {offer.files.length - 6} more file(s)</li>
+                <li className="muted-xs">+ {offer.files.length - 6} more</li>
               )}
             </ul>
 
@@ -89,8 +90,7 @@ export function IncomingOfferModal({
             onChange={(e) => setTrustSender(e.target.checked)}
           />
           <span>
-            Trust <strong>{offer.senderName}</strong> &amp; auto-accept future transfers (pinned to
-            Ed25519 key <code>{offer.senderShortId}</code>)
+            Always accept files automatically from <strong>{offer.senderName}</strong>
           </span>
         </label>
 
@@ -99,7 +99,7 @@ export function IncomingOfferModal({
             Decline
           </button>
           <button className="btn-primary" type="button" onClick={() => onAccept(trustSender)}>
-            {isTextClip ? "Receive Text" : "Accept & Verify"}
+            {isTextClip ? "Receive Text" : "Accept"}
           </button>
         </div>
       </div>

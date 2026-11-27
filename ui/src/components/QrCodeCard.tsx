@@ -1,4 +1,4 @@
-import { Check, Copy, QrCode, ShieldCheck, Square } from "lucide-react";
+import { Check, Copy, QrCode, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { StartSessionResult } from "../types/veloce";
 import { formatBytes } from "../utils/format";
@@ -18,7 +18,7 @@ export function QrCodeCard({ session, hasRelay, onStopSharing }: QrCodeCardProps
     import("qrcode")
       .then((mod) =>
         mod.toDataURL(session.qrUri, {
-          width: 200,
+          width: 184,
           margin: 1,
           color: {
             dark: "#0f172a",
@@ -52,17 +52,17 @@ export function QrCodeCard({ session, hasRelay, onStopSharing }: QrCodeCardProps
       <div className="ticket-header">
         <div className="ticket-title-row">
           <QrCode size={16} className="accent-icon" />
-          <h3>Global Transfer Ready — Share Code or Scan QR</h3>
+          <h3>Share Code Ready</h3>
         </div>
         <div className="ticket-header-actions">
-          <span className="merkle-pill">
-            <ShieldCheck size={13} />
-            BLAKE3 ({session.totalChunks} chunks)
+          <span className="muted-xs">
+            {session.fileCount} {session.fileCount === 1 ? "file" : "files"} •{" "}
+            {formatBytes(session.totalSize)}
           </span>
           <button
             className="btn-secondary btn-sm"
             type="button"
-            title="Stop hosting this ticket"
+            title="Stop sharing this code"
             onClick={onStopSharing}
           >
             <Square size={12} />
@@ -74,7 +74,7 @@ export function QrCodeCard({ session, hasRelay, onStopSharing }: QrCodeCardProps
       <div className="ticket-body">
         <div className="qr-frame">
           {qrDataUrl ? (
-            <img src={qrDataUrl} alt="Global Session QR Code" width={156} height={156} />
+            <img src={qrDataUrl} alt="Share QR Code" width={144} height={144} />
           ) : (
             <div className="qr-placeholder">Generating QR...</div>
           )}
@@ -82,17 +82,9 @@ export function QrCodeCard({ session, hasRelay, onStopSharing }: QrCodeCardProps
 
         <div className="ticket-meta">
           <p className="muted-sm">
-            1. Copy the code below (or scan the QR on Veloce Mobile) • 2. Receiver opens{" "}
-            <strong>Receive</strong> &amp; pastes the code • 3. Keep Veloce open (or in tray) while
-            streaming.
+            Copy this code and send it to the recipient (or scan the QR code in the Veloce mobile
+            app). Keep Veloce open or in your system tray until the download finishes.
           </p>
-          <div className="ticket-stats">
-            <span>{session.fileCount} item(s)</span>
-            <span>•</span>
-            <span>{formatBytes(session.totalSize)}</span>
-            <span>•</span>
-            <span>{formatBytes(session.chunkSize)} chunks</span>
-          </div>
           <div className="ticket-code-box">
             <code className="ticket-code-text">{session.ticketCode}</code>
             <button className="btn-primary btn-sm" onClick={handleCopy} type="button">
@@ -102,8 +94,8 @@ export function QrCodeCard({ session, hasRelay, onStopSharing }: QrCodeCardProps
           </div>
           {!hasRelay && (
             <span className="field-hint">
-              Tip: Sending across cellular CGNAT or symmetric NAT? Add a{" "}
-              <code>veloce-relay</code> host:port in Settings.
+              Works directly across most home &amp; mobile networks. If a strict mobile carrier
+              blocks direct connections, add a Relay Server under Settings → Advanced.
             </span>
           )}
         </div>

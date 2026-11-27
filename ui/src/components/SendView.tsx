@@ -1,4 +1,5 @@
 import {
+  ChevronDown,
   ClipboardPaste,
   FileText,
   FileUp,
@@ -61,6 +62,7 @@ export function SendView({
   onStopSharing,
 }: SendViewProps) {
   const [quickText, setQuickText] = useState("");
+  const [textOpen, setTextOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
 
   const handleSelectFiles = async () => {
@@ -112,9 +114,12 @@ export function SendView({
   const handlePasteClipboard = async () => {
     try {
       const text = await navigator.clipboard.readText();
-      if (text) setQuickText(text);
+      if (text) {
+        setQuickText(text);
+        setTextOpen(true);
+      }
     } catch {
-      // Ignore clipboard permission denials.
+      setTextOpen(true);
     }
   };
 
@@ -124,6 +129,7 @@ export function SendView({
     await onSendText(trimmed, targetPeerNodeId);
     if (targetPeerNodeId) {
       setQuickText("");
+      setTextOpen(false);
     }
   };
 
@@ -143,11 +149,11 @@ export function SendView({
         {selectedPaths.length === 0 ? (
           <>
             <div className="dropzone-icon">
-              <UploadCloud size={26} />
+              <UploadCloud size={24} />
             </div>
-            <h2>Drop files or folders to send</h2>
+            <h2>Choose files or drop them here</h2>
             <p className="muted-sm">
-              Zero-buffer streaming • Missing-chunk auto-resume • End-to-end encrypted P2P
+              Send directly to devices on your Wi-Fi or anywhere with a share code.
             </p>
             <div className="dropzone-buttons">
               <button
@@ -176,9 +182,9 @@ export function SendView({
               <div className="staged-title-group">
                 <strong>
                   {selectedPaths.length}{" "}
-                  {selectedPaths.length === 1 ? "item ready" : "items ready"}
+                  {selectedPaths.length === 1 ? "file selected" : "files selected"}
                 </strong>
-                <span className="muted-xs">Remove any item with × or add more</span>
+                <span className="muted-xs">Click × to unselect any file</span>
               </div>
               <div className="staged-header-actions">
                 <button
@@ -204,10 +210,10 @@ export function SendView({
                   type="button"
                   disabled={busy}
                   onClick={onClearPaths}
-                  title="Unselect all items"
+                  title="Unselect all files"
                 >
                   <Trash2 size={13} />
-                  <span>Clear All</span>
+                  <span>Clear</span>
                 </button>
               </div>
             </div>
@@ -244,21 +250,19 @@ export function SendView({
         <div className="panel-header">
           <div className="panel-title-inline">
             <span className="pulse-dot" />
-            <h3>Nearby Devices (Same Wi-Fi / LAN)</h3>
+            <h3>Nearby Devices</h3>
           </div>
           <span className="muted-xs">
-            {peers.length > 0
-              ? `${peers.length} online • live ~1s sync`
-              : "Auto-updating within ~1s"}
+            {peers.length > 0 ? `${peers.length} on your Wi-Fi` : "Same Wi-Fi / Ethernet"}
           </span>
         </div>
 
         {peers.length === 0 ? (
           <div className="empty-state">
-            <Laptop size={20} />
+            <Laptop size={19} />
             <p className="muted-sm">
-              Open Veloce on another device on the same Wi-Fi or Ethernet — it appears here within
-              a second for instant 1-click transfer.
+              Open Veloce on another phone or computer on the same Wi-Fi — it will show up here
+              automatically.
             </p>
           </div>
         ) : (
@@ -276,16 +280,14 @@ export function SendView({
                       {isTrusted && (
                         <span
                           className="trusted-pill"
-                          title="Trusted Ed25519 identity — incoming offers auto-accept"
+                          title="Auto-accepts incoming files from this device"
                         >
                           <ShieldCheck size={11} />
                           Trusted
                         </span>
                       )}
                     </div>
-                    <span className="muted-xs">
-                      {peer.shortId} • {peer.addresses[0] ?? "LAN"}
-                    </span>
+                    <span className="muted-xs">Ready on local network</span>
                   </div>
                   <div className="peer-card-actions">
                     <button
@@ -293,8 +295,8 @@ export function SendView({
                       className={`icon-btn ${isTrusted ? "icon-btn-trusted" : ""}`}
                       title={
                         isTrusted
-                          ? `Remove ${peer.deviceName} from Trusted Devices`
-                          : `Trust ${peer.deviceName} (auto-accept incoming transfers)`
+                          ? `Stop auto-accepting from ${peer.deviceName}`
+                          : `Always accept files from ${peer.deviceName}`
                       }
                       onClick={() => onToggleTrustPeer(peer)}
                     >
@@ -306,7 +308,7 @@ export function SendView({
                         className="btn-secondary btn-sm"
                         disabled={busy}
                         onClick={() => handleBeamText(peer.nodeId)}
-                        title={`Send quick text to ${peer.deviceName}`}
+                        title={`Send text to ${peer.deviceName}`}
                       >
                         <MessageSquareText size={13} />
                         <span>Text</span>
@@ -341,107 +343,103 @@ export function SendView({
         />
       ) : (
         <section className="panel global-share-panel">
-          <div className="panel-header">
-            <h3 className="panel-title-inline">
-              <Globe size={16} className="accent-icon" />
-              <span>Global Transfer (Send Anywhere Over Internet)</span>
-            </h3>
+          <div className="global-share-row">
+            <div className="global-share-copy">
+              <h3 className="panel-title-inline">
+                <Globe size={16} className="accent-icon" />
+                <span>Send Anywhere (Internet Link / QR)</span>
+              </h3>
+              <p className="muted-sm">
+                Not on the same Wi-Fi? Create a one-time share code — the recipient pastes it in{" "}
+                <strong>Receive</strong> (or scans the QR on phone) to download directly.
+              </p>
+            </div>
             <button
-              className="btn-primary btn-sm"
+              className="btn-primary"
               type="button"
               disabled={busy}
               onClick={handleCreateGlobalCode}
             >
-              <QrCode size={14} />
+              <QrCode size={15} />
               <span>
                 {busy
-                  ? "Preparing..."
+                  ? "Creating..."
                   : selectedPaths.length > 0
-                    ? `Generate Global Code (${selectedPaths.length})`
-                    : "Pick Files & Generate Code"}
+                    ? `Create Share Code (${selectedPaths.length})`
+                    : "Create Share Code"}
               </span>
             </button>
-          </div>
-
-          <div className="how-it-works-grid">
-            <div className="step-chip">
-              <span className="step-num">1</span>
-              <div>
-                <strong>Generate Code</strong>
-                <span className="muted-xs">Creates a one-time encrypted ticket &amp; QR</span>
-              </div>
-            </div>
-            <div className="step-chip">
-              <span className="step-num">2</span>
-              <div>
-                <strong>Share With Receiver</strong>
-                <span className="muted-xs">Send the veloce1… code or scan QR on phone</span>
-              </div>
-            </div>
-            <div className="step-chip">
-              <span className="step-num">3</span>
-              <div>
-                <strong>Direct Stream</strong>
-                <span className="muted-xs">Receiver pastes in Receive • resumes missing chunks</span>
-              </div>
-            </div>
           </div>
         </section>
       )}
 
       <section className="panel quick-text-panel">
-        <div className="panel-header">
-          <h3 className="panel-title-inline">
-            <MessageSquareText size={15} />
-            <span>Quick Text / Link</span>
-          </h3>
-          <div className="panel-header-actions">
-            {hasQuickText && (
-              <button
-                className="btn-secondary btn-sm"
-                type="button"
-                disabled={busy}
-                onClick={() => setQuickText("")}
-              >
-                <X size={13} />
-                <span>Clear</span>
-              </button>
-            )}
-            <button
-              className="btn-secondary btn-sm"
-              type="button"
-              disabled={busy}
-              onClick={handlePasteClipboard}
-              title="Paste from clipboard"
-            >
-              <ClipboardPaste size={13} />
-              <span>Paste</span>
-            </button>
-          </div>
-        </div>
-        <textarea
-          className="text-input quick-text-input"
-          rows={2}
-          value={quickText}
-          onChange={(e) => setQuickText(e.target.value)}
-          placeholder="Paste a link, Wi-Fi password, or snippet to beam over encrypted P2P..."
-        />
-        <div className="quick-text-actions">
-          <span className="muted-xs">
-            {hasQuickText
-              ? "Click Text on a nearby device above, or generate a Global QR / Code."
-              : "Instant encrypted clipboard beam across LAN or Global Code."}
-          </span>
+        <div className="quick-text-bar">
+          <button
+            type="button"
+            className="quick-text-toggle"
+            onClick={() => setTextOpen((v) => !v)}
+            aria-expanded={textOpen}
+          >
+            <MessageSquareText size={15} className="accent-icon" />
+            <span>Send a Text Note or Link</span>
+            <ChevronDown
+              size={15}
+              className={`chevron-icon ${textOpen ? "chevron-open" : ""}`}
+            />
+          </button>
           <button
             className="btn-secondary btn-sm"
             type="button"
-            disabled={busy || !hasQuickText}
-            onClick={() => handleBeamText()}
+            disabled={busy}
+            onClick={handlePasteClipboard}
+            title="Paste text or link from clipboard"
           >
-            <QrCode size={13} />
-            <span>Create Text QR / Code</span>
+            <ClipboardPaste size={13} />
+            <span>Paste &amp; Send</span>
           </button>
         </div>
+
+        {textOpen && (
+          <div className="quick-text-Expanded">
+            <textarea
+              className="text-input quick-text-input"
+              rows={2}
+              value={quickText}
+              onChange={(e) => setQuickText(e.target.value)}
+              placeholder="Type or paste a link, Wi-Fi password, or note..."
+            />
+            <div className="quick-text-actions">
+              <span className="muted-xs">
+                {hasQuickText
+                  ? "Click Text on a nearby device above, or share with a QR code."
+                  : "Encrypted end-to-end across Wi-Fi or Share Code."}
+              </span>
+              <div className="panel-header-actions">
+                {hasQuickText && (
+                  <button
+                    className="btn-secondary btn-sm"
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setQuickText("")}
+                  >
+                    <X size={13} />
+                    <span>Clear</span>
+                  </button>
+                )}
+                <button
+                  className="btn-primary btn-sm"
+                  type="button"
+                  disabled={busy || !hasQuickText}
+                  onClick={() => handleBeamText()}
+                >
+                  <QrCode size={13} />
+                  <span>Share via Code / QR</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </section>
     </div>
   );

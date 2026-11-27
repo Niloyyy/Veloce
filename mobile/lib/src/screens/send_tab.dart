@@ -26,6 +26,7 @@ class SendTab extends StatefulWidget {
 
 class _SendTabState extends State<SendTab> {
   final TextEditingController _quickTextController = TextEditingController();
+  bool _textExpanded = false;
 
   @override
   void dispose() {
@@ -61,8 +62,7 @@ class _SendTabState extends State<SendTab> {
       }
       if (resolved.isEmpty && result.files.isNotEmpty) {
         widget.controller.reportError(
-          'Selected file could not be read locally (cloud-only file). '
-          'Please download it to your device first.',
+          'Selected file is stored in the cloud. Please download it to your device first.',
         );
       }
       return resolved;
@@ -109,8 +109,13 @@ class _SendTabState extends State<SendTab> {
   Future<void> _pasteClipboard() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final text = data?.text ?? '';
-    if (text.isNotEmpty && mounted) {
-      setState(() => _quickTextController.text = text);
+    if (mounted) {
+      setState(() {
+        if (text.isNotEmpty) {
+          _quickTextController.text = text;
+        }
+        _textExpanded = true;
+      });
     }
   }
 
@@ -123,7 +128,10 @@ class _SendTabState extends State<SendTab> {
     );
     if (ok && targetPeerNodeId != null) {
       if (mounted) {
-        setState(() => _quickTextController.clear());
+        setState(() {
+          _quickTextController.clear();
+          _textExpanded = false;
+        });
       }
       widget.onSwitchToTransfers?.call();
     }
@@ -149,17 +157,17 @@ class _SendTabState extends State<SendTab> {
                     children: [
                       Icon(
                         Icons.cloud_upload_outlined,
-                        size: 38,
+                        size: 36,
                         color: scheme.primary,
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'Select Files or Media to Send',
+                        'Choose Files or Photos to Send',
                         style: Theme.of(context).textTheme.titleMedium,
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        'Zero-buffer streaming • Missing-chunk auto-resume • Encrypted P2P',
+                        'Send directly over Wi-Fi or anywhere with a share code.',
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
@@ -170,7 +178,7 @@ class _SendTabState extends State<SendTab> {
                             child: FilledButton.icon(
                               onPressed: ctrl.busy ? null : () => _stageFiles(),
                               icon: const Icon(Icons.insert_drive_file_outlined, size: 18),
-                              label: const Text('Pick Files'),
+                              label: const Text('Select Files'),
                             ),
                           ),
                           const SizedBox(width: 10),
@@ -197,14 +205,14 @@ class _SendTabState extends State<SendTab> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  '${selected.length} ${selected.length == 1 ? 'item ready' : 'items ready'}',
+                                  '${selected.length} ${selected.length == 1 ? 'file selected' : 'files selected'}',
                                   style: Theme.of(context)
                                       .textTheme
                                       .titleSmall
                                       ?.copyWith(fontWeight: FontWeight.w700),
                                 ),
                                 Text(
-                                  'Tap × to unselect any item',
+                                  'Tap × to unselect any file',
                                   style: Theme.of(context).textTheme.bodySmall,
                                 ),
                               ],
@@ -214,7 +222,7 @@ class _SendTabState extends State<SendTab> {
                             onPressed: ctrl.busy ? null : ctrl.clearSelectedPaths,
                             icon: Icon(Icons.delete_sweep_outlined,
                                 size: 17, color: scheme.error),
-                            label: Text('Clear All', style: TextStyle(color: scheme.error)),
+                            label: Text('Clear', style: TextStyle(color: scheme.error)),
                             style: TextButton.styleFrom(
                               visualDensity: VisualDensity.compact,
                             ),
@@ -287,7 +295,7 @@ class _SendTabState extends State<SendTab> {
                                   ? null
                                   : () => _stageFiles(type: FileType.media),
                               icon: const Icon(Icons.photo_library_outlined, size: 17),
-                              label: const Text('+ Media'),
+                              label: const Text('+ Photos'),
                             ),
                           ),
                         ],
@@ -301,13 +309,13 @@ class _SendTabState extends State<SendTab> {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Text(
-              'Nearby Devices (Same Wi-Fi / Hotspot)',
+              'Nearby Devices',
               style: Theme.of(context).textTheme.titleSmall,
             ),
             Text(
               ctrl.peers.isNotEmpty
-                  ? '${ctrl.peers.length} online'
-                  : 'Live ~1s sync',
+                  ? '${ctrl.peers.length} on your Wi-Fi'
+                  : 'Same Wi-Fi / Hotspot',
               style: Theme.of(context).textTheme.labelSmall,
             ),
           ],
@@ -319,12 +327,12 @@ class _SendTabState extends State<SendTab> {
               padding: const EdgeInsets.all(14),
               child: Row(
                 children: [
-                  const Icon(Icons.radar_rounded, size: 20),
+                  const Icon(Icons.wifi_find_rounded, size: 20),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      'Open Veloce on another device on the same Wi-Fi or Hotspot — '
-                      'it appears here within a second.',
+                      'Open Veloce on another phone or computer on the same Wi-Fi — '
+                      'it will appear here automatically.',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ),
@@ -374,8 +382,9 @@ class _SendTabState extends State<SendTab> {
                                 ],
                               ),
                               Text(
-                                '${peer.shortId} • ${peer.addresses.isNotEmpty ? peer.addresses.first : 'LAN'}'
-                                '${isTrusted ? ' • Trusted' : ''}',
+                                isTrusted
+                                    ? 'Trusted • Ready on Wi-Fi'
+                                    : 'Ready on Wi-Fi',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: Theme.of(context).textTheme.bodySmall,
@@ -385,8 +394,8 @@ class _SendTabState extends State<SendTab> {
                         ),
                         IconButton(
                           tooltip: isTrusted
-                              ? 'Untrust ${peer.deviceName}'
-                              : 'Trust ${peer.deviceName} (auto-accept)',
+                              ? 'Stop auto-accepting from ${peer.deviceName}'
+                              : 'Always accept from ${peer.deviceName}',
                           icon: Icon(
                             isTrusted
                                 ? Icons.verified_user_rounded
@@ -440,11 +449,11 @@ class _SendTabState extends State<SendTab> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'Global Transfer Ready',
+                              'Share Code Ready',
                               style: Theme.of(context).textTheme.titleSmall,
                             ),
                             Text(
-                              '${session.fileCount} item(s) • ${formatBytes(session.totalSize)}',
+                              '${session.fileCount} ${session.fileCount == 1 ? 'file' : 'files'} • ${formatBytes(session.totalSize)}',
                               style: Theme.of(context).textTheme.labelSmall,
                             ),
                           ],
@@ -466,13 +475,13 @@ class _SendTabState extends State<SendTab> {
                     ),
                     child: QrImageView(
                       data: session.qrUri,
-                      size: 184,
+                      size: 180,
                       backgroundColor: Colors.white,
                     ),
                   ),
                   const SizedBox(height: 10),
                   Text(
-                    '1. Copy or Share code below (or scan QR) • 2. Receiver opens Receive & pastes code',
+                    'Send this code to the recipient — they paste it in Receive (or scan the QR).',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
@@ -502,7 +511,7 @@ class _SendTabState extends State<SendTab> {
                             );
                             if (context.mounted) {
                               ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Session code copied')),
+                                const SnackBar(content: Text('Share code copied')),
                               );
                             }
                           },
@@ -523,8 +532,7 @@ class _SendTabState extends State<SendTab> {
                   if (!hasRelay) ...[
                     const SizedBox(height: 8),
                     Text(
-                      'Keep Veloce open while sending. Works over IPv6, UPnP & STUN Direct P2P — '
-                      'add a Relay Server in Settings only for IPv4-only double CGNAT.',
+                      'Keep Veloce open until the download completes.',
                       textAlign: TextAlign.center,
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
@@ -546,7 +554,7 @@ class _SendTabState extends State<SendTab> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          'Global Transfer (Send Anywhere)',
+                          'Send Anywhere (Internet Link / QR)',
                           style: Theme.of(context).textTheme.titleSmall,
                         ),
                       ),
@@ -554,8 +562,7 @@ class _SendTabState extends State<SendTab> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    '1. Generate a one-time code & QR • 2. Send code to receiver anywhere • '
-                    '3. Receiver pastes in Receive (automatically skips already-sent chunks).',
+                    'Not on the same Wi-Fi? Create a one-time share code and send it to the recipient.',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   const SizedBox(height: 12),
@@ -566,10 +573,10 @@ class _SendTabState extends State<SendTab> {
                       icon: const Icon(Icons.qr_code_2_rounded, size: 18),
                       label: Text(
                         ctrl.busy
-                            ? 'Preparing...'
+                            ? 'Creating...'
                             : selected.isNotEmpty
-                                ? 'Generate Global Code & QR (${selected.length})'
-                                : 'Pick Files & Generate Global Code',
+                                ? 'Create Share Code (${selected.length})'
+                                : 'Create Share Code & QR',
                       ),
                     ),
                   ),
@@ -580,34 +587,44 @@ class _SendTabState extends State<SendTab> {
         const SizedBox(height: 12),
         Card(
           child: Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
                   children: [
-                    Icon(
-                      Icons.chat_bubble_outline_rounded,
-                      size: 18,
-                      color: scheme.primary,
+                    Expanded(
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(8),
+                        onTap: () => setState(() => _textExpanded = !_textExpanded),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.chat_bubble_outline_rounded,
+                                size: 18,
+                                color: scheme.primary,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'Send a Text Note or Link',
+                                  style: Theme.of(context).textTheme.titleSmall,
+                                ),
+                              ),
+                              Icon(
+                                _textExpanded
+                                    ? Icons.expand_less_rounded
+                                    : Icons.expand_more_rounded,
+                                size: 20,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
                     ),
                     const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        'Quick Text / Link',
-                        style: Theme.of(context).textTheme.titleSmall,
-                      ),
-                    ),
-                    if (hasQuickText)
-                      TextButton(
-                        onPressed: ctrl.busy
-                            ? null
-                            : () => setState(() => _quickTextController.clear()),
-                        style: TextButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                        ),
-                        child: const Text('Clear'),
-                      ),
                     TextButton.icon(
                       onPressed: ctrl.busy ? null : _pasteClipboard,
                       icon: const Icon(Icons.content_paste_rounded, size: 16),
@@ -618,39 +635,50 @@ class _SendTabState extends State<SendTab> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _quickTextController,
-                  minLines: 2,
-                  maxLines: 4,
-                  onChanged: (_) => setState(() {}),
-                  decoration: const InputDecoration(
-                    hintText: 'Paste a URL, Wi-Fi password, or note to beam...',
-                    border: OutlineInputBorder(),
-                    isDense: true,
+                if (_textExpanded) ...[
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _quickTextController,
+                    minLines: 2,
+                    maxLines: 4,
+                    onChanged: (_) => setState(() {}),
+                    decoration: const InputDecoration(
+                      hintText: 'Type or paste a link, Wi-Fi password, or note...',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        hasQuickText
-                            ? 'Tap Text on a nearby device above, or create a QR.'
-                            : 'Encrypted end-to-end across LAN & Global Codes.',
-                        style: Theme.of(context).textTheme.bodySmall,
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          hasQuickText
+                              ? 'Tap Text on a nearby device above, or share via QR.'
+                              : 'Sent privately over an encrypted connection.',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    OutlinedButton.icon(
-                      onPressed: ctrl.busy || !hasQuickText
-                          ? null
-                          : () => _beamQuickText(),
-                      icon: const Icon(Icons.qr_code_rounded, size: 16),
-                      label: const Text('Text QR'),
-                    ),
-                  ],
-                ),
+                      if (hasQuickText)
+                        TextButton(
+                          onPressed: ctrl.busy
+                              ? null
+                              : () => setState(() => _quickTextController.clear()),
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          child: const Text('Clear'),
+                        ),
+                      OutlinedButton.icon(
+                        onPressed: ctrl.busy || !hasQuickText
+                            ? null
+                            : () => _beamQuickText(),
+                        icon: const Icon(Icons.qr_code_rounded, size: 16),
+                        label: const Text('Share QR'),
+                      ),
+                    ],
+                  ),
+                ],
               ],
             ),
           ),

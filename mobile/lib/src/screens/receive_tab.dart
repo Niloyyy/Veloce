@@ -109,6 +109,36 @@ class _ReceiveTabState extends State<ReceiveTab> {
       children: [
         Card(
           child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Row(
+              children: [
+                const Icon(Icons.wifi_rounded, color: Color(0xFF10B981)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        ctrl.nodeInfo != null
+                            ? 'Visible on Wi-Fi as "${ctrl.nodeInfo!.deviceName}"'
+                            : 'Visible on Wi-Fi',
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Devices on the same Wi-Fi or Hotspot can send to you directly.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
             padding: const EdgeInsets.all(16),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -118,7 +148,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                   children: [
                     Expanded(
                       child: Text(
-                        'Receive Globally (Anywhere)',
+                        'Receive with a Share Code',
                         style: Theme.of(context).textTheme.titleMedium,
                       ),
                     ),
@@ -126,7 +156,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         IconButton(
-                          tooltip: 'Paste ticket from clipboard',
+                          tooltip: 'Paste share code',
                           onPressed: _pasteFromClipboard,
                           icon: const Icon(Icons.content_paste_rounded, size: 19),
                         ),
@@ -141,20 +171,19 @@ class _ReceiveTabState extends State<ReceiveTab> {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  '1. Sender taps Generate Global Code • 2. Scan QR or paste veloce1… below • '
-                  '3. Interrupted files resume missing chunks automatically.',
+                  'Receiving from another network? Scan the sender\'s QR code or paste their share code below.',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
                 const SizedBox(height: 12),
                 TextField(
                   controller: _ticketController,
                   minLines: 2,
-                  maxLines: 4,
+                  maxLines: 3,
                   onChanged: _onTicketChanged,
                   style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
                   decoration: InputDecoration(
-                    labelText: 'Session Code (veloce1...)',
-                    hintText: 'Paste a session ticket or scan a QR code',
+                    labelText: 'Share Code',
+                    hintText: 'Paste veloce1… code here',
                     border: const OutlineInputBorder(),
                     errorText: _parseError,
                     suffixIcon: _ticketController.text.isNotEmpty
@@ -178,39 +207,27 @@ class _ReceiveTabState extends State<ReceiveTab> {
                       color: Theme.of(context).colorScheme.surfaceContainerHighest,
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        const Row(
                           children: [
-                            const Row(
-                              children: [
-                                Icon(Icons.verified_user_rounded,
-                                    size: 15, color: Color(0xFF10B981)),
-                                SizedBox(width: 6),
-                                Text(
-                                  'Valid BLAKE3 Ticket',
-                                  style: TextStyle(
-                                    color: Color(0xFF10B981),
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                              ],
-                            ),
+                            Icon(Icons.check_circle_rounded,
+                                size: 15, color: Color(0xFF10B981)),
+                            SizedBox(width: 6),
                             Text(
-                              '${_preview!.fileCount} item(s) • ${formatBytes(_preview!.totalSize)}',
-                              style: Theme.of(context).textTheme.labelMedium,
+                              'Ready to Download',
+                              style: TextStyle(
+                                color: Color(0xFF10B981),
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12,
+                              ),
                             ),
                           ],
                         ),
-                        const SizedBox(height: 6),
                         Text(
-                          'Sender: ${_preview!.senderShortId} • '
-                          '${_preview!.directAddrs.length} direct endpoint(s), '
-                          '${_preview!.relayHints.length} relay(s)',
-                          style: Theme.of(context).textTheme.bodySmall,
+                          '${_preview!.fileCount} ${_preview!.fileCount == 1 ? 'file' : 'files'} • ${formatBytes(_preview!.totalSize)}',
+                          style: Theme.of(context).textTheme.labelMedium,
                         ),
                       ],
                     ),
@@ -253,36 +270,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                   child: FilledButton.icon(
                     onPressed: ctrl.busy || _preview == null ? null : _joinSession,
                     icon: const Icon(Icons.download_rounded, size: 18),
-                    label: Text(ctrl.busy ? 'Connecting...' : 'Download & Verify'),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 14),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(
-              children: [
-                const Icon(Icons.wifi_tethering_rounded, color: Color(0xFF10B981)),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Listening for LAN Offers',
-                        style: Theme.of(context).textTheme.titleSmall,
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        'Nearby devices on Wi-Fi or Hotspot can send directly. '
-                        'Incoming offers prompt for approval before writing any data.',
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ],
+                    label: Text(ctrl.busy ? 'Connecting...' : 'Download Files'),
                   ),
                 ),
               ],

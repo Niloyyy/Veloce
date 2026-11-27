@@ -103,10 +103,8 @@ class _SettingsSheetState extends State<SettingsSheet> {
                 labelText: 'Device Name',
                 hintText: widget.detectedDeviceName.isNotEmpty
                     ? widget.detectedDeviceName
-                    : 'Shown to nearby peers',
-                helperText: widget.detectedDeviceName.isNotEmpty
-                    ? 'Visible to peers • Detected model: ${widget.detectedDeviceName}'
-                    : 'Visible to nearby peers during discovery and transfers',
+                    : 'Shown to nearby devices',
+                helperText: 'Shown to nearby phones and computers',
                 border: const OutlineInputBorder(),
                 counterText: '',
                 suffixIcon: widget.detectedDeviceName.isNotEmpty &&
@@ -121,19 +119,6 @@ class _SettingsSheetState extends State<SettingsSheet> {
                         },
                       )
                     : null,
-              ),
-            ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: _relayController,
-              decoration: const InputDecoration(
-                labelText: 'Relay Server (optional host:port)',
-                hintText: 'relay.example.com:7878',
-                helperText:
-                    'Optional: IPv6, UPnP/NAT-PMP, STUN & Tailscale work free out of the box. '
-                    'Add a self-hosted relay only for double-CGNAT IPv4-only cellular links.',
-                helperMaxLines: 3,
-                border: OutlineInputBorder(),
               ),
             ),
             const SizedBox(height: 14),
@@ -200,8 +185,8 @@ class _SettingsSheetState extends State<SettingsSheet> {
               title: const Text('Save to Downloads / Files'),
               subtitle: Text(
                 hasCustom
-                    ? 'Overridden by your custom save folder above'
-                    : 'Export verified transfers to shared Downloads folder',
+                    ? 'Using your custom folder selected above'
+                    : 'Automatically save received files to Downloads',
               ),
               value: _exportToDownloads,
               onChanged: (v) => setState(() => _exportToDownloads = v),
@@ -210,9 +195,9 @@ class _SettingsSheetState extends State<SettingsSheet> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Appearance Theme', style: Theme.of(context).textTheme.titleSmall),
+                Text('Theme', style: Theme.of(context).textTheme.titleSmall),
                 Text(
-                  'Live preview',
+                  'Tap to preview live',
                   style: Theme.of(context).textTheme.labelSmall,
                 ),
               ],
@@ -255,14 +240,13 @@ class _SettingsSheetState extends State<SettingsSheet> {
             ),
             const SizedBox(height: 16),
             Text(
-              'Trusted Devices (Auto-Accept)',
+              'Trusted Devices',
               style: Theme.of(context).textTheme.titleSmall,
             ),
             const SizedBox(height: 6),
             if (widget.trustedPeers.isEmpty)
               Text(
-                'No trusted devices yet. Tap the shield icon on a nearby device or check '
-                '"Trust" on an incoming offer to auto-accept transfers verified by Ed25519 key.',
+                'None yet. Tap the shield icon on a nearby device to accept its files automatically.',
                 style: Theme.of(context).textTheme.bodySmall,
               )
             else
@@ -285,7 +269,7 @@ class _SettingsSheetState extends State<SettingsSheet> {
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            '${peer.deviceName} • ${peer.shortId}',
+                            peer.deviceName,
                             overflow: TextOverflow.ellipsis,
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
@@ -302,7 +286,35 @@ class _SettingsSheetState extends State<SettingsSheet> {
                   );
                 }).toList(growable: false),
               ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 8),
+            Theme(
+              data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                childrenPadding: const EdgeInsets.only(bottom: 8),
+                initiallyExpanded: _relayController.text.trim().isNotEmpty,
+                title: Text(
+                  'Advanced Network Options',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                ),
+                children: [
+                  TextField(
+                    controller: _relayController,
+                    decoration: const InputDecoration(
+                      labelText: 'Relay Server (optional)',
+                      hintText: 'relay.example.com:7878',
+                      helperText:
+                          'Only needed if two devices on strict mobile networks cannot connect directly.',
+                      helperMaxLines: 2,
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
             SizedBox(
               width: double.infinity,
               child: FilledButton(

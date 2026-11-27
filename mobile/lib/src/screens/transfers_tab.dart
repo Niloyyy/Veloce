@@ -25,13 +25,13 @@ class TransfersTab extends StatelessWidget {
               ),
               const SizedBox(height: 12),
               Text(
-                'No Active Transfers',
+                'No Recent Transfers',
                 style: Theme.of(context).textTheme.titleMedium,
               ),
               const SizedBox(height: 6),
               Text(
-                'Live MB/s speed, ETA, BLAKE3 chunk verification, and connection badges '
-                'will stream here during transfers.',
+                'Files and links you send or receive will appear here with live speed '
+                'and one-tap open.',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodySmall,
               ),
