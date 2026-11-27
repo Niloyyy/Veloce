@@ -116,9 +116,11 @@ class _ReceiveTabState extends State<ReceiveTab> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(
-                      'Join Global Session',
-                      style: Theme.of(context).textTheme.titleMedium,
+                    Expanded(
+                      child: Text(
+                        'Receive Globally (Anywhere)',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
                     ),
                     Row(
                       mainAxisSize: MainAxisSize.min,
@@ -136,6 +138,12 @@ class _ReceiveTabState extends State<ReceiveTab> {
                       ],
                     ),
                   ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '1. Sender taps Generate Global Code • 2. Scan QR or paste veloce1… below • '
+                  '3. Interrupted files resume missing chunks automatically.',
+                  style: Theme.of(context).textTheme.bodySmall,
                 ),
                 const SizedBox(height: 12),
                 TextField(

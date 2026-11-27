@@ -102,7 +102,12 @@
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
-  background: var(--bg);
+  background-color: var(--bg);
+  background-image: radial-gradient(
+    900px circle at 50% -180px,
+    color-mix(in srgb, var(--accent) 8%, transparent),
+    transparent 65%
+  );
   color: var(--text);
   -webkit-font-smoothing: antialiased;
 }
@@ -849,14 +854,23 @@ p {
 }
 
 .modal-card-wide {
-  max-width: 520px;
+  max-width: 540px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+
+.modal-title-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
 }
 
 .settings-title-row {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 2px;
+  margin-top: 0;
 }
 
 .settings-form {
@@ -1157,4 +1171,197 @@ p {
 .trusted-icon {
   color: var(--lan);
   flex-shrink: 0;
+}
+
+.accent-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.count-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.empty-telemetry-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 4px 4px;
+}
+
+.dropzone-has-files {
+  border-style: solid;
+  padding: 18px;
+  text-align: left;
+  align-items: stretch;
+}
+
+.staged-files-box {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.staged-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.staged-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.staged-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.btn-ghost-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-weight: 600;
+  border-radius: 9px;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  transition: background 0.15s ease;
+}
+
+.btn-ghost-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+.staged-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 196px;
+  overflow-y: auto;
+}
+
+.staged-file-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+}
+
+.staged-file-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.staged-file-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.staged-file-name {
+  font-size: 0.84rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-remove-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.file-remove-btn:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 28%, transparent);
+}
+
+.global-share-panel {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+}
+
+.how-it-works-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 720px) {
+  .how-it-works-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar {
+    flex-wrap: wrap;
+  }
+}
+
+.receive-steps {
+  margin-bottom: 14px;
+}
+
+.step-chip {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 11px;
+  border-radius: 10px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+}
+
+.step-chip strong {
+  display: block;
+  font-size: 0.8rem;
+  margin-bottom: 2px;
+}
+
+.step-num {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 800;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  margin-top: 1px;
 }

@@ -5,12 +5,14 @@ import android.app.DownloadManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.media.MediaScannerConnection
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Environment
+import android.os.FileUtils
 import android.os.Handler
 import android.os.Looper
 import android.provider.DocumentsContract
@@ -21,9 +23,12 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.io.FileInputStream
 import java.net.Inet4Address
 import java.net.Inet6Address
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class MainActivity : FlutterActivity() {
     private val channelName = "dev.veloce.p2p/platform"
@@ -500,11 +505,72 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun exportToDefaultDownloads(srcFile: File): ExportedFileRecord? {
+        // Fast O(1) zero-copy rename on Android 11+ (API 30+): both app external staging and public
+        // Downloads/Veloce live on `/storage/emulated/0`, so `renameTo` moves multi-GB files in <1 ms
+        // without re-copying bytes across flash storage!
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                @Suppress("DEPRECATION")
+                val publicRoot = Environment.getExternalStoragePublicDirectory(
+                    Environment.DIRECTORY_DOWNLOADS
+                )
+                if (publicRoot != null) {
+                    val targetDir = File(publicRoot, "Veloce")
+                    if (targetDir.exists() || targetDir.mkdirs()) {
+                        val destFile = resolveUniqueFile(targetDir, srcFile.name)
+                        if (srcFile.renameTo(destFile)) {
+                            var scannedUri: String? = null
+                            val latch = CountDownLatch(1)
+                            MediaScannerConnection.scanFile(
+                                applicationContext,
+                                arrayOf(destFile.absolutePath),
+                                arrayOf(guessMimeType(destFile.name))
+                            ) { _, uri ->
+                                scannedUri = uri?.toString()
+                                latch.countDown()
+                            }
+                            latch.await(1500, TimeUnit.MILLISECONDS)
+                            return ExportedFileRecord(
+                                displayPath = "${Environment.DIRECTORY_DOWNLOADS}/Veloce/${destFile.name}",
+                                openUri = scannedUri ?: destFile.absolutePath,
+                            )
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                // Fall back to MediaStore kernel copy below if direct FUSE rename is restricted.
+            }
+        }
+
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             exportViaMediaStore(srcFile)
         } else {
             exportViaLegacyDownloads(srcFile)
         }
+    }
+
+    private fun copyFileZeroCopy(srcFile: File, targetUri: Uri): Boolean {
+        val resolver = applicationContext.contentResolver
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                resolver.openFileDescriptor(targetUri, "w")?.use { outPfd ->
+                    FileInputStream(srcFile).use { fis ->
+                        FileUtils.copy(fis.fd, outPfd.fileDescriptor)
+                        return true
+                    }
+                }
+            } catch (_: Exception) {
+                // Fall back to buffered stream copy if provider does not expose raw FDs.
+            }
+        }
+        resolver.openOutputStream(targetUri)?.use { out ->
+            srcFile.inputStream().use { input ->
+                input.copyTo(out, bufferSize = 1024 * 1024)
+            }
+            out.flush()
+            return true
+        }
+        return false
     }
 
     private fun exportViaSafTree(
@@ -536,12 +602,7 @@ class MainActivity : FlutterActivity() {
         ) ?: return null
 
         try {
-            resolver.openOutputStream(createdUri)?.use { out ->
-                srcFile.inputStream().use { input ->
-                    input.copyTo(out, bufferSize = 256 * 1024)
-                }
-                out.flush()
-            } ?: run {
+            if (!copyFileZeroCopy(srcFile, createdUri)) {
                 try {
                     DocumentsContract.deleteDocument(resolver, createdUri)
                 } catch (_: Exception) {}
@@ -659,12 +720,7 @@ class MainActivity : FlutterActivity() {
             ?: return null
 
         try {
-            resolver.openOutputStream(uri)?.use { out ->
-                srcFile.inputStream().use { input ->
-                    input.copyTo(out, bufferSize = 256 * 1024)
-                }
-                out.flush()
-            } ?: run {
+            if (!copyFileZeroCopy(srcFile, uri)) {
                 resolver.delete(uri, null, null)
                 return null
             }

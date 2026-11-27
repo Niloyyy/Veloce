@@ -9,6 +9,7 @@ class SettingsSheet extends StatefulWidget {
     super.key,
     required this.settings,
     required this.onSave,
+    this.onPreviewTheme,
     this.onPickSaveFolder,
     this.detectedDeviceName = '',
     this.trustedPeers = const [],
@@ -17,6 +18,7 @@ class SettingsSheet extends StatefulWidget {
 
   final VeloceSettings settings;
   final ValueChanged<VeloceSettings> onSave;
+  final ValueChanged<VeloceThemeId>? onPreviewTheme;
   final Future<PickedSaveFolder?> Function()? onPickSaveFolder;
   final String detectedDeviceName;
   final List<TrustedPeer> trustedPeers;
@@ -205,7 +207,16 @@ class _SettingsSheetState extends State<SettingsSheet> {
               onChanged: (v) => setState(() => _exportToDownloads = v),
             ),
             const SizedBox(height: 8),
-            Text('Appearance Theme', style: Theme.of(context).textTheme.titleSmall),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('Appearance Theme', style: Theme.of(context).textTheme.titleSmall),
+                Text(
+                  'Live preview',
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+              ],
+            ),
             const SizedBox(height: 8),
             Wrap(
               spacing: 8,
@@ -235,7 +246,10 @@ class _SettingsSheetState extends State<SettingsSheet> {
                     ),
                   ),
                   label: Text(theme.label),
-                  onSelected: (_) => setState(() => _themeId = theme),
+                  onSelected: (_) {
+                    setState(() => _themeId = theme);
+                    widget.onPreviewTheme?.call(theme);
+                  },
                 );
               }).toList(growable: false),
             ),

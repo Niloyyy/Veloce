@@ -7,8 +7,8 @@ pub mod merkle;
 pub use assembler::{ChunkAssembler, ChunkWriteOutcome, ResumeState};
 pub use bitfield::ChunkBitfield;
 pub use chunker::{
-    select_chunk_size, select_chunk_size_for_profile, ChunkPayload, ChunkSource, MAX_CHUNK_SIZE,
-    MID_CHUNK_SIZE, MIN_CHUNK_SIZE,
+    select_chunk_size, select_chunk_size_for_profile, ChunkBytesPayload, ChunkPayload, ChunkSource,
+    MAX_CHUNK_SIZE, MID_CHUNK_SIZE, MIN_CHUNK_SIZE,
 };
 pub use error::{Result, StorageError};
 pub use merkle::MerkleTree;

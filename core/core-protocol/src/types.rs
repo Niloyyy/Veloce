@@ -90,23 +90,23 @@ impl TransferProfile {
     pub const fn default_parallel_streams(self) -> usize {
         match self {
             TransferProfile::Desktop => 8,
-            TransferProfile::Mobile => 4,
+            TransferProfile::Mobile => 6,
         }
     }
 
     /// Pipelined chunk requests in flight per QUIC stream.
     pub const fn stream_pipeline_depth(self) -> usize {
         match self {
-            TransferProfile::Desktop => 4,
-            TransferProfile::Mobile => 2,
+            TransferProfile::Desktop => 8,
+            TransferProfile::Mobile => 4,
         }
     }
 
     /// Maximum concurrent BLAKE3 verify + positional disk write tasks.
     pub const fn max_concurrent_disk_writes(self) -> usize {
         match self {
-            TransferProfile::Desktop => 24,
-            TransferProfile::Mobile => 6,
+            TransferProfile::Desktop => 32,
+            TransferProfile::Mobile => 16,
         }
     }
 
@@ -129,32 +129,32 @@ impl TransferProfile {
     /// Connection-level QUIC flow-control receive window in bytes.
     pub const fn quic_receive_window(self) -> u32 {
         match self {
-            TransferProfile::Desktop => 64 * 1024 * 1024,
-            TransferProfile::Mobile => 8 * 1024 * 1024,
+            TransferProfile::Desktop => 128 * 1024 * 1024,
+            TransferProfile::Mobile => 32 * 1024 * 1024,
         }
     }
 
     /// Per-stream QUIC flow-control receive window in bytes.
     pub const fn quic_stream_receive_window(self) -> u32 {
         match self {
-            TransferProfile::Desktop => 16 * 1024 * 1024,
-            TransferProfile::Mobile => 2 * 1024 * 1024,
+            TransferProfile::Desktop => 32 * 1024 * 1024,
+            TransferProfile::Mobile => 8 * 1024 * 1024,
         }
     }
 
     /// Connection-level QUIC send window in bytes.
     pub const fn quic_send_window(self) -> u64 {
         match self {
-            TransferProfile::Desktop => 64 * 1024 * 1024,
-            TransferProfile::Mobile => 8 * 1024 * 1024,
+            TransferProfile::Desktop => 128 * 1024 * 1024,
+            TransferProfile::Mobile => 32 * 1024 * 1024,
         }
     }
 
-    /// BBR initial congestion window in bytes.
+    /// Initial congestion window in bytes for rapid multi-Gbps Wi-Fi / LAN & WAN ramp-up.
     pub const fn bbr_initial_window(self) -> u64 {
         match self {
-            TransferProfile::Desktop => 512 * 1024,
-            TransferProfile::Mobile => 128 * 1024,
+            TransferProfile::Desktop => 2 * 1024 * 1024,
+            TransferProfile::Mobile => 1024 * 1024,
         }
     }
 
@@ -162,12 +162,20 @@ impl TransferProfile {
     pub const fn udp_buffer_ladder(self) -> &'static [usize] {
         match self {
             TransferProfile::Desktop => &[
+                16 * 1024 * 1024,
                 8 * 1024 * 1024,
                 4 * 1024 * 1024,
                 2 * 1024 * 1024,
                 1024 * 1024,
             ],
-            TransferProfile::Mobile => &[2 * 1024 * 1024, 1024 * 1024, 512 * 1024, 256 * 1024],
+            TransferProfile::Mobile => &[
+                8 * 1024 * 1024,
+                4 * 1024 * 1024,
+                2 * 1024 * 1024,
+                1024 * 1024,
+                512 * 1024,
+                256 * 1024,
+            ],
         }
     }
 }

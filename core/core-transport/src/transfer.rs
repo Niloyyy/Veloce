@@ -4,10 +4,12 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use bytes::{Buf, Bytes, BytesMut};
 use core_protocol::{
-    read_data_frame, read_frame, write_data_frame, write_frame, ChunkErrorCode, ConnectionType,
-    ControlMessage, DataMessage, HandshakeStateMachine, NodeId, TransferManifest, TransferProfile,
-    MAX_CONTROL_FRAME_SIZE, MAX_DATA_FRAME_SIZE, PROTOCOL_VERSION,
+    encode_chunk_response_header, encode_postcard_data_frame, read_frame, write_frame,
+    ChunkErrorCode, ConnectionType, ControlMessage, DataMessage, HandshakeStateMachine, NodeId,
+    ProtocolError, TransferManifest, TransferProfile, ZeroCopyDataFrame, DATA_TAG_CHUNK_RESPONSE,
+    DATA_TAG_POSTCARD_FALLBACK, MAX_CONTROL_FRAME_SIZE, MAX_DATA_FRAME_SIZE, PROTOCOL_VERSION,
 };
 use core_storage::{ChunkAssembler, ChunkBitfield, ChunkSource};
 use quinn::Connection;
@@ -17,6 +19,9 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{Result, TransportError};
+use crate::identity::{peer_node_id, PeerIdentity};
+use crate::lan_lane::{connect_lan_tls_stream, LanSessionRegistration, LanTcpLane, LanTlsStream};
+use crate::magic_socket::MagicUdpSocket;
 
 /// Default number of concurrent bidirectional QUIC streams used per transfer session
 /// to saturate Long Fat Networks and eliminate head-of-line blocking.
@@ -97,11 +102,43 @@ impl Default for TransferConfig {
 pub async fn run_sender_session(
     transfer_id: String,
     conn: Connection,
+    ctrl_send: quinn::SendStream,
+    ctrl_recv: quinn::RecvStream,
+    sm: HandshakeStateMachine,
+    source: Arc<ChunkSource>,
+    sender_name: String,
+    connection_type_rx: Arc<Mutex<ConnectionType>>,
+    progress_tx: Option<mpsc::UnboundedSender<TransferProgress>>,
+    cancel: CancellationToken,
+) -> Result<TransferSummary> {
+    run_sender_session_with_lan_lane(
+        transfer_id,
+        conn,
+        ctrl_send,
+        ctrl_recv,
+        sm,
+        source,
+        sender_name,
+        None,
+        connection_type_rx,
+        progress_tx,
+        cancel,
+    )
+    .await
+}
+
+/// Executes the sender side of a transfer, accepting chunk requests over both QUIC data streams
+/// and optional kernel-offloaded (TSO/GRO) Ed25519 mutual-TLS 1.3 LAN TCP streams simultaneously.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_sender_session_with_lan_lane(
+    transfer_id: String,
+    conn: Connection,
     mut ctrl_send: quinn::SendStream,
     mut ctrl_recv: quinn::RecvStream,
     mut sm: HandshakeStateMachine,
     source: Arc<ChunkSource>,
     sender_name: String,
+    lan_lane: Option<&LanTcpLane>,
     connection_type_rx: Arc<Mutex<ConnectionType>>,
     progress_tx: Option<mpsc::UnboundedSender<TransferProgress>>,
     cancel: CancellationToken,
@@ -109,6 +146,15 @@ pub async fn run_sender_session(
     let manifest = source.manifest().clone();
     let total_bytes = manifest.total_size;
     let total_chunks = manifest.total_chunks;
+
+    // Register `(peer_node_id, session_id)` on the LAN TCP lane BEFORE sending `Offer` so
+    // fast LAN receivers can dial TLS 1.3 TCP streams immediately upon `Accept`.
+    let mut lan_registration: Option<LanSessionRegistration> = match lan_lane {
+        Some(lane) => peer_node_id(&conn)
+            .ok()
+            .map(|peer_id| lane.register_session(peer_id, manifest.session_id)),
+        None => None,
+    };
 
     let offer = ControlMessage::Offer {
         manifest: manifest.clone(),
@@ -124,20 +170,29 @@ pub async fn run_sender_session(
             TransportError::Connection("control stream closed before acceptance".into())
         })?;
 
-    match accept_msg {
+    let (resumed_chunks, initial_sent_bytes) = match accept_msg {
         ControlMessage::Accept { resume_bitfield } => {
             sm.on_receive(ControlMessage::Accept {
                 resume_bitfield: resume_bitfield.clone(),
             })?;
-            let resumed_chunks = ChunkBitfield::from_bytes(total_chunks, &resume_bitfield)
-                .map(|b| b.verified_count())
-                .unwrap_or(0);
+            let (verified_cnt, verified_bytes) =
+                match ChunkBitfield::from_bytes(total_chunks, &resume_bitfield) {
+                    Some(bf) => {
+                        let bytes: u64 = (0..total_chunks)
+                            .filter(|&i| bf.is_set(i))
+                            .filter_map(|i| manifest.locate_chunk(i).map(|(_, _, len)| len as u64))
+                            .sum();
+                        (bf.verified_count(), bytes)
+                    }
+                    None => (0, 0),
+                };
             tracing::info!(
                 transfer_id = %transfer_id,
-                resumed_chunks,
+                resumed_chunks = verified_cnt,
                 total_chunks,
                 "Peer accepted transfer"
             );
+            (verified_cnt, verified_bytes)
         }
         ControlMessage::Reject { reason } => {
             let _ = sm.on_receive(ControlMessage::Reject {
@@ -159,13 +214,30 @@ pub async fn run_sender_session(
                 },
             ));
         }
-    }
+    };
 
     let start = Instant::now();
     // Latched the exact moment the first chunk starts being read/sent over data streams.
     let first_chunk_start: Arc<OnceLock<Instant>> = Arc::new(OnceLock::new());
-    let bytes_sent = Arc::new(AtomicU64::new(0));
-    let chunks_sent = Arc::new(AtomicU32::new(0));
+    let bytes_sent = Arc::new(AtomicU64::new(initial_sent_bytes));
+    let chunks_sent = Arc::new(AtomicU32::new(resumed_chunks));
+
+    if resumed_chunks > 0 {
+        if let Some(ref tx) = progress_tx {
+            emit_progress(
+                tx,
+                &transfer_id,
+                TransferDirection::Send,
+                initial_sent_bytes.min(total_bytes),
+                0,
+                total_bytes,
+                resumed_chunks.min(total_chunks),
+                total_chunks,
+                start,
+                *connection_type_rx.lock().expect("conn_type lock poisoned"),
+            );
+        }
+    }
 
     // Spawn data-stream serving loop handling pipelined parallel chunk requests concurrently.
     let serve_cancel = cancel.child_token();
@@ -183,8 +255,36 @@ pub async fn run_sender_session(
         loop {
             tokio::select! {
                 _ = serve_cancel_bg.cancelled() => break,
+                Some(lan_tls) = recv_lan_registration(&mut lan_registration) => {
+                    let src = Arc::clone(&serve_source);
+                    let bytes_counter = Arc::clone(&serve_bytes);
+                    let chunks_counter = Arc::clone(&serve_chunks);
+                    let first_chunk = Arc::clone(&serve_first_chunk);
+                    let prog = serve_progress.clone();
+                    let tid = serve_id.clone();
+                    let ct = Arc::clone(&serve_conn_type);
+                    let stream_cancel = serve_cancel_bg.clone();
+
+                    tokio::spawn(async move {
+                        serve_lan_tls_stream(
+                            lan_tls,
+                            src,
+                            bytes_counter,
+                            chunks_counter,
+                            initial_sent_bytes,
+                            total_bytes,
+                            total_chunks,
+                            first_chunk,
+                            prog,
+                            tid,
+                            ct,
+                            stream_cancel,
+                        )
+                        .await;
+                    });
+                }
                 accepted = serve_conn.accept_bi() => {
-                    let (mut send, mut recv) = match accepted {
+                    let (mut send, recv) = match accepted {
                         Ok(streams) => streams,
                         Err(_) => break,
                     };
@@ -198,34 +298,163 @@ pub async fn run_sender_session(
                     let stream_cancel = serve_cancel_bg.clone();
 
                     tokio::spawn(async move {
-                        while !stream_cancel.is_cancelled() {
-                            let req: Option<DataMessage> = match read_data_frame(&mut recv, MAX_DATA_FRAME_SIZE).await {
-                                Ok(r) => r,
-                                Err(_) => break,
-                            };
-                            let Some(msg) = req else { break };
-                            let indices = match msg {
-                                DataMessage::ChunkRequest { chunk_index } => vec![chunk_index],
-                                DataMessage::ChunkBatchRequest { chunk_indices } => chunk_indices,
-                                _ => continue,
-                            };
+                        if src.has_active_mmaps() {
+                            // Zero-copy inline fast path for memory-mapped desktop files:
+                            // slices `Bytes` directly from `Arc<Mmap>` without `spawn_blocking` or `memcpy`.
+                            let mut reader = QuicRecvReader::new(recv);
+                            let mut write_vec: Vec<Bytes> = Vec::with_capacity(16);
+                            while !stream_cancel.is_cancelled() {
+                                let req = match reader.read_next_frame(MAX_DATA_FRAME_SIZE).await {
+                                    Ok(Some(ZeroCopyDataFrame::Control(msg))) => msg,
+                                    Ok(Some(_)) => continue,
+                                    Ok(None) | Err(_) => break,
+                                };
+                                let indices = match req {
+                                    DataMessage::ChunkRequest { chunk_index } => vec![chunk_index],
+                                    DataMessage::ChunkBatchRequest { chunk_indices } => chunk_indices,
+                                    _ => continue,
+                                };
 
-                            for idx in indices {
+                                write_vec.clear();
+                                for idx in indices {
+                                    if stream_cancel.is_cancelled() {
+                                        break;
+                                    }
+                                    let chunk_start = *first_chunk.get_or_init(Instant::now);
+                                    match src.read_chunk_bytes(idx) {
+                                        Ok(payload) => {
+                                            let len = payload.data.len() as u64;
+                                            let sent_so_far =
+                                                bytes_counter.fetch_add(len, Ordering::Relaxed) + len;
+                                            let done_chunks =
+                                                chunks_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                                            if let Some(ref tx) = prog {
+                                                emit_progress(
+                                                    tx,
+                                                    &tid,
+                                                    TransferDirection::Send,
+                                                    sent_so_far.min(total_bytes),
+                                                    sent_so_far.saturating_sub(initial_sent_bytes),
+                                                    total_bytes,
+                                                    done_chunks.min(total_chunks),
+                                                    total_chunks,
+                                                    chunk_start,
+                                                    *ct.lock().expect("conn_type lock poisoned"),
+                                                );
+                                            }
+                                            let Ok(hdr) = encode_chunk_response_header(
+                                                payload.chunk_index,
+                                                &payload.hash,
+                                                &payload.proof,
+                                                payload.data.len(),
+                                                MAX_DATA_FRAME_SIZE,
+                                            ) else {
+                                                return;
+                                            };
+                                            write_vec.push(hdr);
+                                            write_vec.push(payload.data);
+                                            // Flush every 4 chunks so the receiver starts verifying immediately.
+                                            if write_vec.len() >= 8 {
+                                                if send.write_all_chunks(&mut write_vec).await.is_err() {
+                                                    return;
+                                                }
+                                                write_vec.clear();
+                                            }
+                                        }
+                                        Err(err) => {
+                                            if !write_vec.is_empty() {
+                                                if send.write_all_chunks(&mut write_vec).await.is_err() {
+                                                    return;
+                                                }
+                                                write_vec.clear();
+                                            }
+                                            let err_msg = DataMessage::ChunkError {
+                                                chunk_index: idx,
+                                                code: ChunkErrorCode::IoError,
+                                                message: err.to_string(),
+                                            };
+                                            let Ok(encoded) =
+                                                encode_postcard_data_frame(&err_msg, MAX_DATA_FRAME_SIZE)
+                                            else {
+                                                return;
+                                            };
+                                            if send.write_chunk(encoded).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if !write_vec.is_empty()
+                                    && send.write_all_chunks(&mut write_vec).await.is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            let _ = send.finish();
+                        } else {
+                            // Pipelined prefetch path for Mobile / unmapped `pread` sources:
+                            // overlaps concurrent flash `pread` tasks with QUIC Wi-Fi transmission.
+                            type PrefetchItem = (
+                                u32,
+                                tokio::task::JoinHandle<
+                                    core_storage::Result<core_storage::ChunkBytesPayload>,
+                                >,
+                            );
+                            let (pf_tx, mut pf_rx) = mpsc::channel::<PrefetchItem>(6);
+                            let reader_src = Arc::clone(&src);
+                            let reader_cancel = stream_cancel.clone();
+                            let reader_first = Arc::clone(&first_chunk);
+
+                            let req_reader = tokio::spawn(async move {
+                                let mut reader = QuicRecvReader::new(recv);
+                                while !reader_cancel.is_cancelled() {
+                                    let req = match reader.read_next_frame(MAX_DATA_FRAME_SIZE).await {
+                                        Ok(Some(ZeroCopyDataFrame::Control(msg))) => msg,
+                                        Ok(Some(_)) => continue,
+                                        Ok(None) | Err(_) => break,
+                                    };
+                                    let indices = match req {
+                                        DataMessage::ChunkRequest { chunk_index } => vec![chunk_index],
+                                        DataMessage::ChunkBatchRequest { chunk_indices } => {
+                                            chunk_indices
+                                        }
+                                        _ => continue,
+                                    };
+                                    for idx in indices {
+                                        if reader_cancel.is_cancelled() {
+                                            return;
+                                        }
+                                        reader_first.get_or_init(Instant::now);
+                                        let s = Arc::clone(&reader_src);
+                                        let handle =
+                                            tokio::task::spawn_blocking(move || s.read_chunk_bytes(idx));
+                                        if pf_tx.send((idx, handle)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                            });
+
+                            while let Some((idx, handle)) = pf_rx.recv().await {
                                 if stream_cancel.is_cancelled() {
                                     break;
                                 }
                                 let chunk_start = *first_chunk.get_or_init(Instant::now);
-                                let resp = match src.read_chunk_async(idx).await {
-                                    Ok(payload) => {
+                                match handle.await {
+                                    Ok(Ok(payload)) => {
                                         let len = payload.data.len() as u64;
-                                        let sent_so_far = bytes_counter.fetch_add(len, Ordering::Relaxed) + len;
-                                        let done_chunks = chunks_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                                        let sent_so_far =
+                                            bytes_counter.fetch_add(len, Ordering::Relaxed) + len;
+                                        let done_chunks =
+                                            chunks_counter.fetch_add(1, Ordering::Relaxed) + 1;
                                         if let Some(ref tx) = prog {
                                             emit_progress(
                                                 tx,
                                                 &tid,
                                                 TransferDirection::Send,
                                                 sent_so_far.min(total_bytes),
+                                                sent_so_far.saturating_sub(initial_sent_bytes),
                                                 total_bytes,
                                                 done_chunks.min(total_chunks),
                                                 total_chunks,
@@ -233,26 +462,41 @@ pub async fn run_sender_session(
                                                 *ct.lock().expect("conn_type lock poisoned"),
                                             );
                                         }
-                                        DataMessage::ChunkResponse {
-                                            chunk_index: payload.chunk_index,
-                                            hash: payload.hash,
-                                            proof: payload.proof,
-                                            data: payload.data,
+                                        let Ok(hdr) = encode_chunk_response_header(
+                                            payload.chunk_index,
+                                            &payload.hash,
+                                            &payload.proof,
+                                            payload.data.len(),
+                                            MAX_DATA_FRAME_SIZE,
+                                        ) else {
+                                            break;
+                                        };
+                                        let mut chunks = [hdr, payload.data];
+                                        if send.write_all_chunks(&mut chunks).await.is_err() {
+                                            break;
                                         }
                                     }
-                                    Err(err) => DataMessage::ChunkError {
-                                        chunk_index: idx,
-                                        code: ChunkErrorCode::IoError,
-                                        message: err.to_string(),
-                                    },
-                                };
-
-                                if write_data_frame(&mut send, &resp, MAX_DATA_FRAME_SIZE).await.is_err() {
-                                    return;
+                                    Ok(Err(err)) => {
+                                        let err_msg = DataMessage::ChunkError {
+                                            chunk_index: idx,
+                                            code: ChunkErrorCode::IoError,
+                                            message: err.to_string(),
+                                        };
+                                        let Ok(encoded) =
+                                            encode_postcard_data_frame(&err_msg, MAX_DATA_FRAME_SIZE)
+                                        else {
+                                            break;
+                                        };
+                                        if send.write_chunk(encoded).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(_) => break,
                                 }
                             }
+                            req_reader.abort();
+                            let _ = send.finish();
                         }
-                        let _ = send.finish();
                     });
                 }
             }
@@ -271,16 +515,19 @@ pub async fn run_sender_session(
             match ctrl_res? {
                 Some(ControlMessage::TransferComplete { verified_chunks }) => {
                     sm.on_receive(ControlMessage::TransferComplete { verified_chunks })?;
+                    let _ = ctrl_send.finish();
                     let chunk_origin = first_chunk_start.get().copied().unwrap_or(start);
                     let elapsed = chunk_origin.elapsed();
                     let elapsed_ms = elapsed.as_millis().max(1) as u64;
-                    let avg_speed = (total_bytes as f64) / elapsed.as_secs_f64().max(0.0001);
+                    let sent_this_session = total_bytes.saturating_sub(initial_sent_bytes);
+                    let avg_speed = (sent_this_session as f64) / elapsed.as_secs_f64().max(0.0001);
                     if let Some(ref tx) = progress_tx {
                         emit_progress(
                             tx,
                             &transfer_id,
                             TransferDirection::Send,
                             total_bytes,
+                            sent_this_session,
                             total_bytes,
                             total_chunks,
                             total_chunks,
@@ -358,6 +605,42 @@ pub async fn run_receiver_session(
 pub async fn run_receiver_session_with_profile(
     transfer_id: String,
     conn: Connection,
+    ctrl_send: quinn::SendStream,
+    ctrl_recv: quinn::RecvStream,
+    sm: HandshakeStateMachine,
+    manifest: TransferManifest,
+    output_dir: PathBuf,
+    parallel_streams: usize,
+    profile: TransferProfile,
+    connection_type_rx: Arc<Mutex<ConnectionType>>,
+    progress_tx: Option<mpsc::UnboundedSender<TransferProgress>>,
+    cancel: CancellationToken,
+) -> Result<TransferSummary> {
+    run_receiver_session_with_lan_lane(
+        transfer_id,
+        conn,
+        ctrl_send,
+        ctrl_recv,
+        sm,
+        manifest,
+        output_dir,
+        parallel_streams,
+        profile,
+        None,
+        connection_type_rx,
+        progress_tx,
+        cancel,
+    )
+    .await
+}
+
+/// Executes the receiver side of a transfer, automatically accelerating direct `ConnectionType::Lan`
+/// sessions with parallel kernel-offloaded (TSO/GRO) Ed25519 mutual-TLS 1.3 TCP data streams and
+/// falling back seamlessly to multi-stream QUIC (BBR) whenever TCP is unavailable or on WAN/Relay.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_receiver_session_with_lan_lane(
+    transfer_id: String,
+    conn: Connection,
     mut ctrl_send: quinn::SendStream,
     mut ctrl_recv: quinn::RecvStream,
     mut sm: HandshakeStateMachine,
@@ -365,6 +648,7 @@ pub async fn run_receiver_session_with_profile(
     output_dir: PathBuf,
     parallel_streams: usize,
     profile: TransferProfile,
+    local_identity: Option<&PeerIdentity>,
     connection_type_rx: Arc<Mutex<ConnectionType>>,
     progress_tx: Option<mpsc::UnboundedSender<TransferProgress>>,
     cancel: CancellationToken,
@@ -396,6 +680,23 @@ pub async fn run_receiver_session_with_profile(
         .sum();
     let bytes_received = Arc::new(AtomicU64::new(initial_bytes));
 
+    if initial_verified > 0 {
+        if let Some(ref tx) = progress_tx {
+            emit_progress(
+                tx,
+                &transfer_id,
+                TransferDirection::Receive,
+                initial_bytes.min(total_bytes),
+                0,
+                total_bytes,
+                initial_verified.min(total_chunks),
+                total_chunks,
+                data_start,
+                *connection_type_rx.lock().expect("conn_type lock poisoned"),
+            );
+        }
+    }
+
     // Monitor control stream for remote cancellation while data streams run.
     let remote_cancel = cancel.child_token();
     let ctrl_watch_cancel = remote_cancel.clone();
@@ -426,12 +727,74 @@ pub async fn run_receiver_session_with_profile(
             missing.into_iter().map(|idx| (idx, 0u32)).collect(),
         ));
         let disk_sem = Arc::new(Semaphore::new(max_disk_writes));
-        let worker_count = parallel_streams
-            .max(1)
-            .min(total_chunks.max(1) as usize);
+        let remote_addr = conn.remote_address();
+        let is_direct_lan = *connection_type_rx.lock().expect("conn_type lock poisoned")
+            == ConnectionType::Lan
+            && !MagicUdpSocket::is_virtual_addr(remote_addr)
+            && total_bytes >= 512 * 1024;
+
+        // Probe the high-throughput Ed25519 mTLS 1.3 LAN TCP data lane when on direct LAN.
+        let mut initial_lan_streams: Vec<Option<LanTlsStream>> = Vec::new();
+        let mut lan_reconnect_ctx: Option<(std::net::SocketAddr, NodeId, [u8; 16], PeerIdentity)> =
+            None;
+        if is_direct_lan {
+            if let (Some(id), Ok(sender_id)) = (local_identity, peer_node_id(&conn)) {
+                if let Ok(first_stream) = connect_lan_tls_stream(
+                    remote_addr,
+                    sender_id,
+                    manifest.session_id,
+                    id,
+                    profile,
+                    Duration::from_millis(120),
+                )
+                .await
+                {
+                    let lan_workers = parallel_streams
+                        .clamp(1, 4)
+                        .min(total_chunks.max(1) as usize);
+                    initial_lan_streams.push(Some(first_stream));
+                    let mut extra = JoinSet::new();
+                    for _ in 1..lan_workers {
+                        let id_clone = id.clone();
+                        let sid = manifest.session_id;
+                        extra.spawn(async move {
+                            connect_lan_tls_stream(
+                                remote_addr,
+                                sender_id,
+                                sid,
+                                &id_clone,
+                                profile,
+                                Duration::from_millis(250),
+                            )
+                            .await
+                            .ok()
+                        });
+                    }
+                    while let Some(res) = extra.join_next().await {
+                        if let Ok(Some(s)) = res {
+                            initial_lan_streams.push(Some(s));
+                        }
+                    }
+                    lan_reconnect_ctx =
+                        Some((remote_addr, sender_id, manifest.session_id, id.clone()));
+                }
+            }
+        }
+
+        let worker_count = if !initial_lan_streams.is_empty() {
+            initial_lan_streams.len()
+        } else {
+            parallel_streams
+                .max(1)
+                .min(total_chunks.max(1) as usize)
+        };
 
         let mut workers = Vec::with_capacity(worker_count);
-        for _ in 0..worker_count {
+        for worker_idx in 0..worker_count {
+            let preconnected_lan = initial_lan_streams
+                .get_mut(worker_idx)
+                .and_then(Option::take);
+            let w_lan_ctx = lan_reconnect_ctx.clone();
             let w_conn = conn.clone();
             let w_queue = Arc::clone(&queue);
             let w_assembler = Arc::clone(&assembler);
@@ -444,8 +807,19 @@ pub async fn run_receiver_session_with_profile(
             let w_sem = Arc::clone(&disk_sem);
 
             workers.push(tokio::spawn(async move {
-                let (mut send, mut recv) = w_conn.open_bi().await?;
+                let mut client_io = match preconnected_lan {
+                    Some(tls) => ClientDataIo::LanTls(Box::new(tls)),
+                    None => {
+                        let (send, recv) = w_conn.open_bi().await?;
+                        ClientDataIo::Quic {
+                            send,
+                            reader: QuicRecvReader::new(recv),
+                        }
+                    }
+                };
+                let refill_watermark = (pipeline_depth / 2).max(1);
                 let mut inflight: VecDeque<(u32, u32)> = VecDeque::with_capacity(pipeline_depth);
+                let mut batch_req_indices: Vec<u32> = Vec::with_capacity(pipeline_depth);
                 let mut disk_tasks: JoinSet<Result<()>> = JoinSet::new();
 
                 loop {
@@ -462,39 +836,78 @@ pub async fn run_receiver_session_with_profile(
                         }
                     }
 
-                    // Fill pipeline window up to `pipeline_depth` requests ahead.
-                    while inflight.len() < pipeline_depth {
-                        let next_item = {
+                    // Watermarked batch-fill: top up to `pipeline_depth` in one `ChunkBatchRequest`
+                    // whenever in-flight requests drop to `<= pipeline_depth / 2`.
+                    let want = if inflight.len() <= refill_watermark {
+                        pipeline_depth.saturating_sub(inflight.len())
+                    } else {
+                        0
+                    };
+                    if want > 0 {
+                        batch_req_indices.clear();
+                        let mut popped: Vec<(u32, u32)> = Vec::with_capacity(want);
+                        {
                             let mut q = w_queue.lock().expect("queue lock poisoned");
-                            q.pop_front()
-                        };
-                        let Some((chunk_index, attempt)) = next_item else {
-                            break;
-                        };
-                        let req = DataMessage::ChunkRequest { chunk_index };
-                        w_first_chunk.get_or_init(Instant::now);
-                        if let Err(err) = write_data_frame(&mut send, &req, MAX_DATA_FRAME_SIZE).await {
-                            // Requeue failed request + any remaining in-flight items on stream reset.
-                            requeue_item(&w_queue, chunk_index, attempt, &w_cancel, TransportError::Protocol(err))?;
-                            while let Some((idx, att)) = inflight.pop_front() {
-                                if att + 1 < MAX_CHUNK_RETRIES {
-                                    w_queue.lock().expect("queue lock").push_back((idx, att + 1));
-                                }
+                            for _ in 0..want {
+                                let Some(item) = q.pop_front() else {
+                                    break;
+                                };
+                                batch_req_indices.push(item.0);
+                                popped.push(item);
                             }
-                            let reopened = w_conn.open_bi().await?;
-                            send = reopened.0;
-                            recv = reopened.1;
-                            continue;
                         }
-                        inflight.push_back((chunk_index, attempt));
+
+                        if !popped.is_empty() {
+                            w_first_chunk.get_or_init(Instant::now);
+                            let req_msg = if batch_req_indices.len() == 1 {
+                                DataMessage::ChunkRequest {
+                                    chunk_index: batch_req_indices[0],
+                                }
+                            } else {
+                                DataMessage::ChunkBatchRequest {
+                                    chunk_indices: batch_req_indices.clone(),
+                                }
+                            };
+                            let encoded =
+                                encode_postcard_data_frame(&req_msg, MAX_DATA_FRAME_SIZE)?;
+                            if let Err(write_err) = client_io.write_request(encoded).await {
+                                let mut iter = popped.into_iter();
+                                if let Some((first_idx, first_att)) = iter.next() {
+                                    requeue_item(
+                                        &w_queue,
+                                        first_idx,
+                                        first_att,
+                                        &w_cancel,
+                                        write_err,
+                                    )?;
+                                }
+                                {
+                                    let mut q = w_queue.lock().expect("queue lock");
+                                    for (idx, att) in iter {
+                                        q.push_front((idx, att));
+                                    }
+                                    while let Some((idx, att)) = inflight.pop_front() {
+                                        if att + 1 < MAX_CHUNK_RETRIES {
+                                            q.push_back((idx, att + 1));
+                                        }
+                                    }
+                                }
+                                client_io =
+                                    reopen_client_data_io(&w_conn, &w_lan_ctx, profile).await?;
+                                continue;
+                            }
+                            for item in popped {
+                                inflight.push_back(item);
+                            }
+                        }
                     }
 
                     let Some((expected_idx, attempt)) = inflight.pop_front() else {
                         break;
                     };
 
-                    let resp: DataMessage = match read_data_frame(&mut recv, MAX_DATA_FRAME_SIZE).await {
-                        Ok(Some(msg)) => msg,
+                    let resp = match client_io.read_next_frame(MAX_DATA_FRAME_SIZE).await {
+                        Ok(Some(frame)) => frame,
                         Ok(None) => {
                             requeue_item(
                                 &w_queue,
@@ -508,9 +921,8 @@ pub async fn run_receiver_session_with_profile(
                                     w_queue.lock().expect("queue lock").push_back((idx, att + 1));
                                 }
                             }
-                            let reopened = w_conn.open_bi().await?;
-                            send = reopened.0;
-                            recv = reopened.1;
+                            client_io =
+                                reopen_client_data_io(&w_conn, &w_lan_ctx, profile).await?;
                             continue;
                         }
                         Err(err) => {
@@ -526,15 +938,14 @@ pub async fn run_receiver_session_with_profile(
                                     w_queue.lock().expect("queue lock").push_back((idx, att + 1));
                                 }
                             }
-                            let reopened = w_conn.open_bi().await?;
-                            send = reopened.0;
-                            recv = reopened.1;
+                            client_io =
+                                reopen_client_data_io(&w_conn, &w_lan_ctx, profile).await?;
                             continue;
                         }
                     };
 
                     match resp {
-                        DataMessage::ChunkResponse {
+                        ZeroCopyDataFrame::ChunkResponse {
                             chunk_index: resp_idx,
                             proof,
                             data,
@@ -569,7 +980,7 @@ pub async fn run_receiver_session_with_profile(
 
                             disk_tasks.spawn(async move {
                                 let _permit = permit;
-                                match asm.write_verified_chunk_async(expected_idx, data, proof).await {
+                                match asm.write_verified_chunk_bytes_async(expected_idx, data, proof).await {
                                     Ok(outcome) => {
                                         let done_bytes = bytes
                                             .fetch_add(outcome.bytes_written as u64, Ordering::Relaxed)
@@ -580,6 +991,7 @@ pub async fn run_receiver_session_with_profile(
                                                 &tid,
                                                 TransferDirection::Receive,
                                                 done_bytes.min(total_bytes),
+                                                done_bytes.saturating_sub(initial_bytes),
                                                 total_bytes,
                                                 outcome.verified_chunks,
                                                 outcome.total_chunks,
@@ -615,7 +1027,7 @@ pub async fn run_receiver_session_with_profile(
                                 }
                             });
                         }
-                        DataMessage::ChunkError { message, .. } => {
+                        ZeroCopyDataFrame::Control(DataMessage::ChunkError { message, .. }) => {
                             requeue_item(
                                 &w_queue,
                                 expected_idx,
@@ -626,7 +1038,7 @@ pub async fn run_receiver_session_with_profile(
                                 )),
                             )?;
                         }
-                        _ => {}
+                        ZeroCopyDataFrame::Control(_) => {}
                     }
                 }
 
@@ -639,7 +1051,7 @@ pub async fn run_receiver_session_with_profile(
                     }
                 }
 
-                let _ = send.finish();
+                client_io.finish().await;
                 Ok::<(), TransportError>(())
             }));
         }
@@ -697,7 +1109,7 @@ pub async fn run_receiver_session_with_profile(
     write_frame(&mut ctrl_send, &complete_msg, MAX_CONTROL_FRAME_SIZE).await?;
     let _ = ctrl_send.finish();
     // Wait briefly for the sender to process TransferComplete and close the connection cleanly.
-    let _ = tokio::time::timeout(Duration::from_millis(150), conn.closed()).await;
+    let _ = tokio::time::timeout(Duration::from_millis(25), conn.closed()).await;
 
     let total_elapsed = session_start.elapsed();
     let elapsed_ms = total_elapsed.as_millis().max(1) as u64;
@@ -712,6 +1124,7 @@ pub async fn run_receiver_session_with_profile(
             &transfer_id,
             TransferDirection::Receive,
             total_bytes,
+            transferred_this_session,
             total_bytes,
             total_chunks,
             total_chunks,
@@ -739,6 +1152,378 @@ pub async fn run_receiver_session_with_profile(
         steady_state_speed_bytes_per_sec: steady_speed,
         finalized_paths,
     })
+}
+
+async fn recv_lan_registration(
+    reg: &mut Option<LanSessionRegistration>,
+) -> Option<LanTlsStream> {
+    match reg {
+        Some(r) => r.stream_rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_lan_tls_stream(
+    mut tls_stream: LanTlsStream,
+    src: Arc<ChunkSource>,
+    bytes_counter: Arc<AtomicU64>,
+    chunks_counter: Arc<AtomicU32>,
+    initial_sent_bytes: u64,
+    total_bytes: u64,
+    total_chunks: u32,
+    first_chunk: Arc<OnceLock<Instant>>,
+    prog: Option<mpsc::UnboundedSender<TransferProgress>>,
+    tid: String,
+    ct: Arc<Mutex<ConnectionType>>,
+    stream_cancel: CancellationToken,
+) {
+    let mut write_vec: Vec<Bytes> = Vec::with_capacity(16);
+    while !stream_cancel.is_cancelled() {
+        let req = match tls_stream.read_next_frame(MAX_DATA_FRAME_SIZE).await {
+            Ok(Some(ZeroCopyDataFrame::Control(msg))) => msg,
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => break,
+        };
+        let indices = match req {
+            DataMessage::ChunkRequest { chunk_index } => vec![chunk_index],
+            DataMessage::ChunkBatchRequest { chunk_indices } => chunk_indices,
+            _ => continue,
+        };
+
+        write_vec.clear();
+        if src.has_active_mmaps() {
+            for idx in indices {
+                if stream_cancel.is_cancelled() {
+                    break;
+                }
+                let chunk_start = *first_chunk.get_or_init(Instant::now);
+                match src.read_chunk_bytes(idx) {
+                    Ok(payload) => {
+                        let len = payload.data.len() as u64;
+                        let sent_so_far = bytes_counter.fetch_add(len, Ordering::Relaxed) + len;
+                        let done_chunks = chunks_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Some(ref tx) = prog {
+                            emit_progress(
+                                tx,
+                                &tid,
+                                TransferDirection::Send,
+                                sent_so_far.min(total_bytes),
+                                sent_so_far.saturating_sub(initial_sent_bytes),
+                                total_bytes,
+                                done_chunks.min(total_chunks),
+                                total_chunks,
+                                chunk_start,
+                                *ct.lock().expect("conn_type lock poisoned"),
+                            );
+                        }
+                        let Ok(hdr) = encode_chunk_response_header(
+                            payload.chunk_index,
+                            &payload.hash,
+                            &payload.proof,
+                            payload.data.len(),
+                            MAX_DATA_FRAME_SIZE,
+                        ) else {
+                            return;
+                        };
+                        write_vec.push(hdr);
+                        write_vec.push(payload.data);
+                        if write_vec.len() >= 4 {
+                            if tls_stream.write_bytes_batch(&write_vec).await.is_err() {
+                                return;
+                            }
+                            write_vec.clear();
+                        }
+                    }
+                    Err(err) => {
+                        if !write_vec.is_empty() {
+                            if tls_stream.write_bytes_batch(&write_vec).await.is_err() {
+                                return;
+                            }
+                            write_vec.clear();
+                        }
+                        let err_msg = DataMessage::ChunkError {
+                            chunk_index: idx,
+                            code: ChunkErrorCode::IoError,
+                            message: err.to_string(),
+                        };
+                        let Ok(encoded) = encode_postcard_data_frame(&err_msg, MAX_DATA_FRAME_SIZE)
+                        else {
+                            return;
+                        };
+                        if tls_stream.write_bytes_batch(&[encoded]).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+            if !write_vec.is_empty() && tls_stream.write_bytes_batch(&write_vec).await.is_err() {
+                return;
+            }
+        } else {
+            // Mobile / unmapped `pread` path: kick off all requested chunk reads in parallel!
+            let mut handles = Vec::with_capacity(indices.len());
+            for idx in indices {
+                if stream_cancel.is_cancelled() {
+                    break;
+                }
+                first_chunk.get_or_init(Instant::now);
+                let s = Arc::clone(&src);
+                handles.push((idx, tokio::task::spawn_blocking(move || s.read_chunk_bytes(idx))));
+            }
+            for (idx, handle) in handles {
+                if stream_cancel.is_cancelled() {
+                    return;
+                }
+                let chunk_start = *first_chunk.get_or_init(Instant::now);
+                match handle.await {
+                    Ok(Ok(payload)) => {
+                        let len = payload.data.len() as u64;
+                        let sent_so_far = bytes_counter.fetch_add(len, Ordering::Relaxed) + len;
+                        let done_chunks = chunks_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Some(ref tx) = prog {
+                            emit_progress(
+                                tx,
+                                &tid,
+                                TransferDirection::Send,
+                                sent_so_far.min(total_bytes),
+                                sent_so_far.saturating_sub(initial_sent_bytes),
+                                total_bytes,
+                                done_chunks.min(total_chunks),
+                                total_chunks,
+                                chunk_start,
+                                *ct.lock().expect("conn_type lock poisoned"),
+                            );
+                        }
+                        let Ok(hdr) = encode_chunk_response_header(
+                            payload.chunk_index,
+                            &payload.hash,
+                            &payload.proof,
+                            payload.data.len(),
+                            MAX_DATA_FRAME_SIZE,
+                        ) else {
+                            return;
+                        };
+                        if tls_stream
+                            .write_bytes_batch(&[hdr, payload.data])
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        let err_msg = DataMessage::ChunkError {
+                            chunk_index: idx,
+                            code: ChunkErrorCode::IoError,
+                            message: err.to_string(),
+                        };
+                        let Ok(encoded) = encode_postcard_data_frame(&err_msg, MAX_DATA_FRAME_SIZE)
+                        else {
+                            return;
+                        };
+                        if tls_stream.write_bytes_batch(&[encoded]).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(_) => return,
+                }
+            }
+        }
+    }
+    let _ = tls_stream.finish().await;
+}
+
+enum ClientDataIo {
+    Quic {
+        send: quinn::SendStream,
+        reader: QuicRecvReader,
+    },
+    LanTls(Box<LanTlsStream>),
+}
+
+impl ClientDataIo {
+    async fn write_request(&mut self, encoded: Bytes) -> Result<()> {
+        match self {
+            ClientDataIo::Quic { send, .. } => send
+                .write_chunk(encoded)
+                .await
+                .map_err(|e| TransportError::Connection(e.to_string())),
+            ClientDataIo::LanTls(tls) => tls
+                .write_bytes_batch(&[encoded])
+                .await
+                .map_err(|e| TransportError::Connection(e.to_string())),
+        }
+    }
+
+    async fn read_next_frame(
+        &mut self,
+        max_size: usize,
+    ) -> core_protocol::Result<Option<ZeroCopyDataFrame>> {
+        match self {
+            ClientDataIo::Quic { reader, .. } => reader.read_next_frame(max_size).await,
+            ClientDataIo::LanTls(tls) => tls.read_next_frame(max_size).await,
+        }
+    }
+
+    async fn finish(&mut self) {
+        match self {
+            ClientDataIo::Quic { send, .. } => {
+                let _ = send.finish();
+            }
+            ClientDataIo::LanTls(tls) => {
+                let _ = tls.finish().await;
+            }
+        }
+    }
+}
+
+async fn reopen_client_data_io(
+    conn: &Connection,
+    lan_ctx: &Option<(std::net::SocketAddr, NodeId, [u8; 16], PeerIdentity)>,
+    profile: TransferProfile,
+) -> Result<ClientDataIo> {
+    if let Some((addr, peer_id, session_id, identity)) = lan_ctx {
+        if let Ok(tls) = connect_lan_tls_stream(
+            *addr,
+            *peer_id,
+            *session_id,
+            identity,
+            profile,
+            Duration::from_millis(250),
+        )
+        .await
+        {
+            return Ok(ClientDataIo::LanTls(Box::new(tls)));
+        }
+    }
+    let (send, recv) = conn.open_bi().await?;
+    Ok(ClientDataIo::Quic {
+        send,
+        reader: QuicRecvReader::new(recv),
+    })
+}
+
+/// Rolling `BytesMut` reader over `quinn::RecvStream::read_chunk` that assembles `ZeroCopyDataFrame`
+/// payloads directly into uninitialized spare capacity without `vec![0u8; chunk_size]` zero-fill `memset`s.
+struct QuicRecvReader {
+    recv: quinn::RecvStream,
+    buf: BytesMut,
+}
+
+impl QuicRecvReader {
+    fn new(recv: quinn::RecvStream) -> Self {
+        Self {
+            recv,
+            buf: BytesMut::with_capacity(64 * 1024),
+        }
+    }
+
+    async fn ensure_bytes(&mut self, needed: usize) -> core_protocol::Result<bool> {
+        if self.buf.len() >= needed {
+            return Ok(true);
+        }
+        self.buf.reserve(needed - self.buf.len());
+        while self.buf.len() < needed {
+            let max_pull = (needed - self.buf.len()).max(64 * 1024);
+            let chunk = self
+                .recv
+                .read_chunk(max_pull, true)
+                .await
+                .map_err(|e| ProtocolError::Io(std::io::Error::other(e.to_string())))?;
+            match chunk {
+                Some(c) if !c.bytes.is_empty() => {
+                    self.buf.extend_from_slice(&c.bytes);
+                }
+                _ => {
+                    if self.buf.is_empty() {
+                        return Ok(false);
+                    }
+                    return Err(ProtocolError::UnexpectedEof);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    async fn read_next_frame(
+        &mut self,
+        max_size: usize,
+    ) -> core_protocol::Result<Option<ZeroCopyDataFrame>> {
+        if !self.ensure_bytes(1).await? {
+            return Ok(None);
+        }
+        let tag = self.buf.get_u8();
+
+        match tag {
+            DATA_TAG_CHUNK_RESPONSE => {
+                if !self.ensure_bytes(38).await? {
+                    return Err(ProtocolError::UnexpectedEof);
+                }
+                let chunk_index = self.buf.get_u32();
+                let mut hash = [0u8; 32];
+                self.buf.copy_to_slice(&mut hash);
+                let proof_len = self.buf.get_u16() as usize;
+                if proof_len > 64 {
+                    return Err(ProtocolError::FrameTooLarge {
+                        size: proof_len * 32,
+                        max: 64 * 32,
+                    });
+                }
+
+                let proof_bytes_len = proof_len * 32;
+                if !self.ensure_bytes(proof_bytes_len + 4).await? {
+                    return Err(ProtocolError::UnexpectedEof);
+                }
+                let mut proof = Vec::with_capacity(proof_len);
+                for _ in 0..proof_len {
+                    let mut node = [0u8; 32];
+                    self.buf.copy_to_slice(&mut node);
+                    proof.push(node);
+                }
+                let data_len = self.buf.get_u32() as usize;
+                let total_len = 1 + 38 + proof_bytes_len + 4 + data_len;
+                if total_len > max_size {
+                    return Err(ProtocolError::FrameTooLarge {
+                        size: total_len,
+                        max: max_size,
+                    });
+                }
+
+                if data_len > 0 && !self.ensure_bytes(data_len).await? {
+                    return Err(ProtocolError::UnexpectedEof);
+                }
+                let data = self.buf.split_to(data_len).freeze();
+                Ok(Some(ZeroCopyDataFrame::ChunkResponse {
+                    chunk_index,
+                    hash,
+                    proof,
+                    data,
+                }))
+            }
+            DATA_TAG_POSTCARD_FALLBACK => {
+                if !self.ensure_bytes(4).await? {
+                    return Err(ProtocolError::UnexpectedEof);
+                }
+                let frame_len = self.buf.get_u32() as usize;
+                if frame_len > max_size {
+                    return Err(ProtocolError::FrameTooLarge {
+                        size: frame_len,
+                        max: max_size,
+                    });
+                }
+                if frame_len > 0 && !self.ensure_bytes(frame_len).await? {
+                    return Err(ProtocolError::UnexpectedEof);
+                }
+                let payload = self.buf.split_to(frame_len);
+                let decoded: DataMessage = postcard::from_bytes(&payload)?;
+                Ok(Some(ZeroCopyDataFrame::Control(decoded)))
+            }
+            other => Err(ProtocolError::InvalidSignalingPacket(format!(
+                "unknown data frame tag 0x{other:02x}"
+            ))),
+        }
+    }
 }
 
 fn requeue_item(
@@ -820,6 +1605,7 @@ fn emit_progress(
     transfer_id: &str,
     direction: TransferDirection,
     bytes_transferred: u64,
+    session_bytes_delta: u64,
     total_bytes: u64,
     chunks_verified: u32,
     total_chunks: u32,
@@ -829,7 +1615,11 @@ fn emit_progress(
     let elapsed = start.elapsed();
     let elapsed_ms = elapsed.as_millis() as u64;
     let elapsed_secs = elapsed.as_secs_f64().max(0.001);
-    let speed = (bytes_transferred as f64) / elapsed_secs;
+    let speed = if session_bytes_delta > 0 {
+        (session_bytes_delta as f64) / elapsed_secs
+    } else {
+        0.0
+    };
     let remaining = total_bytes.saturating_sub(bytes_transferred) as f64;
     let eta = if speed > 1.0 { remaining / speed } else { 0.0 };
 

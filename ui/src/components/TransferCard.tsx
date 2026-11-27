@@ -242,6 +242,9 @@ export const TransferCard = memo(function TransferCard({
           <span className="chunk-status">
             <ShieldCheck size={13} />
             {transfer.chunksVerified} / {transfer.totalChunks} chunks verified
+            {transfer.initialChunksVerified && transfer.initialChunksVerified > 0
+              ? ` • ${transfer.initialChunksVerified} resumed`
+              : ""}
           </span>
         </div>
         <SpeedSparkline samples={transfer.speedHistory} />

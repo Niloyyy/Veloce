@@ -7,6 +7,7 @@ interface SettingsModalProps {
   settings: DesktopSettings;
   detectedDeviceName?: string;
   saving: boolean;
+  onPreviewTheme: (theme: ThemeId) => void;
   onBrowseDownloadDir: () => Promise<string | null>;
   onSave: (next: DesktopSettings) => Promise<void>;
   onClose: () => void;
@@ -16,6 +17,7 @@ export function SettingsModal({
   settings,
   detectedDeviceName,
   saving,
+  onPreviewTheme,
   onBrowseDownloadDir,
   onSave,
   onClose,
@@ -25,12 +27,25 @@ export function SettingsModal({
   const [relayText, setRelayText] = useState(settings.relayAddrs.join(", "));
   const [parallelStreams, setParallelStreams] = useState(settings.parallelStreams);
   const [selectedTheme, setSelectedTheme] = useState<ThemeId>(settings.theme);
+  const [runInBackground, setRunInBackground] = useState<boolean>(
+    settings.runInBackground ?? true,
+  );
   const [trustedPeers, setTrustedPeers] = useState<TrustedPeer[]>(settings.trustedPeers ?? []);
   const [error, setError] = useState<string | null>(null);
 
   const handleBrowse = async () => {
     const picked = await onBrowseDownloadDir();
     if (picked) setDownloadDir(picked);
+  };
+
+  const handleSelectTheme = (nextTheme: ThemeId) => {
+    setSelectedTheme(nextTheme);
+    onPreviewTheme(nextTheme);
+  };
+
+  const handleCancel = () => {
+    onPreviewTheme(settings.theme);
+    onClose();
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -53,6 +68,7 @@ export function SettingsModal({
         relayAddrs,
         parallelStreams,
         theme: selectedTheme,
+        runInBackground,
         trustedPeers,
       });
       onClose();
@@ -70,8 +86,8 @@ export function SettingsModal({
     >
       <div className="modal-card modal-card-wide">
         <div className="modal-header">
-          <div>
-            <span className="eyebrow">Node & Transfer Preferences</span>
+          <div className="modal-title-stack">
+            <span className="eyebrow">Node &amp; Transfer Preferences</span>
             <h2 id="settings-modal-title" className="settings-title-row">
               <SlidersHorizontal size={18} />
               <span>Settings</span>
@@ -81,7 +97,7 @@ export function SettingsModal({
             className="icon-btn"
             type="button"
             aria-label="Close settings"
-            onClick={onClose}
+            onClick={handleCancel}
             disabled={saving}
           >
             <X size={16} />
@@ -143,56 +159,35 @@ export function SettingsModal({
             </div>
           </div>
 
-          <div className="field-group">
-            <label className="input-label" htmlFor="veloce-relay-addrs">
-              Relay Addresses (host:port)
-            </label>
+          <label className="trust-checkbox-row" htmlFor="veloce-bg-mode">
             <input
-              id="veloce-relay-addrs"
-              className="text-input text-input-mono"
-              type="text"
-              value={relayText}
-              onChange={(e) => setRelayText(e.target.value)}
-              placeholder="relay.example.com:7878, 203.0.113.10:7878"
+              id="veloce-bg-mode"
+              type="checkbox"
+              checked={runInBackground}
+              onChange={(e) => setRunInBackground(e.target.checked)}
+              disabled={saving}
             />
-            <span className="field-hint">
-              Optional comma-separated host:port hints. Native IPv6, UPnP/NAT-PMP, STUN, and
-              Tailscale/ZeroTier work free with no relay; add a self-hosted veloce-relay only when
-              both peers are on IPv4-only symmetric CGNAT.
-            </span>
-          </div>
-
-          <div className="field-group">
-            <div className="range-header">
-              <label className="input-label" htmlFor="veloce-parallel-streams">
-                Parallel QUIC Streams
-              </label>
-              <span className="range-value">{parallelStreams} streams</span>
+            <div>
+              <strong>Keep running in background (System Tray)</strong>
+              <div className="field-hint">
+                Closing the window hides Veloce to the system tray so nearby devices &amp; global
+                transfers stay reachable anytime.
+              </div>
             </div>
-            <input
-              id="veloce-parallel-streams"
-              className="range-input"
-              type="range"
-              min={1}
-              max={32}
-              step={1}
-              value={parallelStreams}
-              onChange={(e) => setParallelStreams(Number(e.target.value))}
-            />
-            <span className="field-hint">
-              Recommended: 8 for desktop LAN/WAN, 4 for low-power links, 16–32 for high-BDP fiber.
-            </span>
-          </div>
+          </label>
 
           <div className="field-group">
-            <span className="input-label">Appearance Theme</span>
+            <div className="field-label-row">
+              <span className="input-label">Appearance Theme</span>
+              <span className="muted-xs">Live preview enabled</span>
+            </div>
             <div className="theme-picker-grid">
               {THEME_OPTIONS.map((opt) => (
                 <button
                   key={opt.id}
                   type="button"
                   className={`theme-swatch-btn ${selectedTheme === opt.id ? "active" : ""}`}
-                  onClick={() => setSelectedTheme(opt.id)}
+                  onClick={() => handleSelectTheme(opt.id)}
                 >
                   <span
                     className="theme-swatch-dot"
@@ -210,12 +205,51 @@ export function SettingsModal({
           </div>
 
           <div className="field-group">
+            <label className="input-label" htmlFor="veloce-relay-addrs">
+              Relay Addresses (optional host:port)
+            </label>
+            <input
+              id="veloce-relay-addrs"
+              className="text-input text-input-mono"
+              type="text"
+              value={relayText}
+              onChange={(e) => setRelayText(e.target.value)}
+              placeholder="relay.example.com:7878, 203.0.113.10:7878"
+            />
+            <span className="field-hint">
+              Native IPv6, UPnP/NAT-PMP, STUN, and Tailscale/ZeroTier work free with no relay; add
+              a self-hosted veloce-relay only when both peers are on IPv4-only symmetric CGNAT.
+            </span>
+          </div>
+
+          <div className="field-group">
+            <div className="range-header">
+              <label className="input-label" htmlFor="veloce-parallel-streams">
+                Parallel Streams
+              </label>
+              <span className="range-value">{parallelStreams} streams</span>
+            </div>
+            <input
+              id="veloce-parallel-streams"
+              className="range-input"
+              type="range"
+              min={1}
+              max={32}
+              step={1}
+              value={parallelStreams}
+              onChange={(e) => setParallelStreams(Number(e.target.value))}
+            />
+            <span className="field-hint">
+              Recommended: 8 for LAN/WAN, 4 for low-power links, 16–32 for high-latency fiber.
+            </span>
+          </div>
+
+          <div className="field-group">
             <span className="input-label">Trusted Devices (Auto-Accept)</span>
             {trustedPeers.length === 0 ? (
               <span className="field-hint">
                 No trusted devices yet. Click the shield icon on a nearby device or check
-                &ldquo;Trust&rdquo; when accepting an offer to auto-accept transfers pinned to its
-                cryptographic Ed25519 Node ID.
+                &ldquo;Trust&rdquo; on an incoming offer to auto-accept transfers silently.
               </span>
             ) : (
               <ul className="trusted-list">
@@ -250,7 +284,7 @@ export function SettingsModal({
             <button
               className="btn-secondary"
               type="button"
-              onClick={onClose}
+              onClick={handleCancel}
               disabled={saving}
             >
               Cancel

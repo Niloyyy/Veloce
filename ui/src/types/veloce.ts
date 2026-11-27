@@ -22,6 +22,7 @@ export interface DesktopSettings {
   relayAddrs: string[];
   parallelStreams: number;
   theme: ThemeId;
+  runInBackground: boolean;
   trustedPeers: TrustedPeer[];
 }
 
@@ -157,6 +158,7 @@ export interface TransferRecord {
   totalBytes: number;
   chunksVerified: number;
   totalChunks: number;
+  initialChunksVerified?: number;
   speedBytesPerSec: number;
   speedHistory: number[];
   etaSeconds: number;
@@ -173,6 +175,7 @@ export interface VeloceBridgeApi {
   updateSettings: (
     settings: Partial<DesktopSettings>,
   ) => Promise<UpdateSettingsResult>;
+  previewTheme?: (theme: ThemeId) => Promise<void>;
   pickFiles: () => Promise<string[]>;
   pickFolders: () => Promise<string[]>;
   pickOutputDir: () => Promise<string | null>;

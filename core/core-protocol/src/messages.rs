@@ -1,6 +1,7 @@
 use std::fmt;
 use std::net::SocketAddr;
 
+use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -264,8 +265,80 @@ where
     Ok(Some(decoded))
 }
 
-const DATA_TAG_CHUNK_RESPONSE: u8 = 0x81;
-const DATA_TAG_POSTCARD_FALLBACK: u8 = 0x80;
+pub const DATA_TAG_CHUNK_RESPONSE: u8 = 0x81;
+pub const DATA_TAG_POSTCARD_FALLBACK: u8 = 0x80;
+
+/// Zero-copy `Bytes`-backed representation of a data-stream frame so QUIC senders and
+/// receivers avoid redundant multi-megabyte `Vec<u8>` zero-fills and copies.
+#[derive(Debug, Clone)]
+pub enum ZeroCopyDataFrame {
+    ChunkResponse {
+        chunk_index: u32,
+        hash: [u8; 32],
+        proof: Vec<[u8; 32]>,
+        data: Bytes,
+    },
+    Control(DataMessage),
+}
+
+/// Encodes only the binary header for `DATA_TAG_CHUNK_RESPONSE` so `quinn::SendStream::write_all_chunks`
+/// can transmit `[header_bytes, raw_chunk_bytes]` atomically without copying `raw_chunk_bytes`.
+pub fn encode_chunk_response_header(
+    chunk_index: u32,
+    hash: &[u8; 32],
+    proof: &[[u8; 32]],
+    data_len: usize,
+    max_size: usize,
+) -> Result<Bytes> {
+    let header_len = 1 + 4 + 32 + 2 + proof.len() * 32 + 4;
+    let total_len = header_len.saturating_add(data_len);
+    if total_len > max_size {
+        return Err(ProtocolError::FrameTooLarge {
+            size: total_len,
+            max: max_size,
+        });
+    }
+    let proof_len_u16 = u16::try_from(proof.len()).map_err(|_| ProtocolError::FrameTooLarge {
+        size: total_len,
+        max: max_size,
+    })?;
+    let data_len_u32 = u32::try_from(data_len).map_err(|_| ProtocolError::FrameTooLarge {
+        size: total_len,
+        max: max_size,
+    })?;
+
+    let mut hdr = BytesMut::with_capacity(header_len);
+    hdr.extend_from_slice(&[DATA_TAG_CHUNK_RESPONSE]);
+    hdr.extend_from_slice(&chunk_index.to_be_bytes());
+    hdr.extend_from_slice(hash);
+    hdr.extend_from_slice(&proof_len_u16.to_be_bytes());
+    for node in proof {
+        hdr.extend_from_slice(node);
+    }
+    hdr.extend_from_slice(&data_len_u32.to_be_bytes());
+    Ok(hdr.freeze())
+}
+
+/// Encodes a non-`ChunkResponse` `DataMessage` (`ChunkRequest`, `ChunkBatchRequest`, `ChunkError`)
+/// into a single contiguous `Bytes` buffer for single-call QUIC `write_chunk` submission.
+pub fn encode_postcard_data_frame(msg: &DataMessage, max_size: usize) -> Result<Bytes> {
+    let payload = postcard::to_allocvec(msg)?;
+    if payload.len() + 1 > max_size {
+        return Err(ProtocolError::FrameTooLarge {
+            size: payload.len() + 1,
+            max: max_size,
+        });
+    }
+    let len_u32 = u32::try_from(payload.len()).map_err(|_| ProtocolError::FrameTooLarge {
+        size: payload.len(),
+        max: max_size,
+    })?;
+    let mut out = BytesMut::with_capacity(5 + payload.len());
+    out.extend_from_slice(&[DATA_TAG_POSTCARD_FALLBACK]);
+    out.extend_from_slice(&len_u32.to_be_bytes());
+    out.extend_from_slice(&payload);
+    Ok(out.freeze())
+}
 
 /// Zero-extra-copy streaming writer for `DataMessage` on high-throughput QUIC data streams.
 ///

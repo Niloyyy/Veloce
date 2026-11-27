@@ -2,6 +2,7 @@ pub mod discovery;
 pub mod endpoint;
 pub mod error;
 pub mod identity;
+pub mod lan_lane;
 pub mod magic_socket;
 pub mod nat;
 pub mod port_map;
@@ -648,6 +649,92 @@ mod tests {
             elapsed < std::time::Duration::from_secs(3),
             "parallel direct racing stalled for {:?}",
             elapsed
+        );
+
+        sender.shutdown();
+        receiver.shutdown();
+    }
+
+    #[tokio::test]
+    async fn cross_session_deduplicates_partial_and_finalized_files() {
+        let src_dir = tempdir().unwrap();
+        let dst_dir = tempdir().unwrap();
+
+        let alpha_path = src_dir.path().join("alpha.bin");
+        let beta_path = src_dir.path().join("beta.bin");
+        let alpha_data: Vec<u8> = (0..180_000u32).map(|i| ((i * 19) % 251) as u8).collect();
+        let beta_data: Vec<u8> = (0..220_000u32).map(|i| ((i * 23) % 241) as u8).collect();
+        fs::write(&alpha_path, &alpha_data).unwrap();
+        fs::write(&beta_path, &beta_data).unwrap();
+
+        // 1. Pre-finalize `alpha.bin` in destination and leave `beta.bin` half-written in `.part`
+        //    from an earlier closed session.
+        let initial_source = ChunkSource::from_paths_async(
+            vec![alpha_path.clone(), beta_path.clone()],
+            Some(32 * 1024),
+        )
+        .await
+        .unwrap();
+        fs::write(dst_dir.path().join("alpha.bin"), &alpha_data).unwrap();
+
+        {
+            let partial_asm =
+                ChunkAssembler::open(dst_dir.path(), initial_source.manifest().clone()).unwrap();
+            // `alpha.bin` chunks must already be recognized as verified without creating a `.part`!
+            let alpha_chunks = initial_source.manifest().files[0].chunk_count;
+            assert!(partial_asm.verified_count() >= alpha_chunks);
+
+            // Write half of `beta.bin`'s chunks, then drop session without finalizing.
+            let beta_entry = &initial_source.manifest().files[1];
+            for local in 0..(beta_entry.chunk_count / 2) {
+                let idx = beta_entry.first_chunk + local;
+                let chunk = initial_source.read_chunk(idx).unwrap();
+                partial_asm
+                    .write_verified_chunk(chunk.chunk_index, &chunk.data, &chunk.proof)
+                    .unwrap();
+            }
+            partial_asm.persist_state().unwrap();
+        }
+
+        // 2. Start a BRAND-NEW sender session (new `session_id` + new `SessionTicket`) for the
+        //    same files and verify only the remaining missing chunks of `beta.bin` are transferred!
+        let new_source = ChunkSource::from_paths_async(vec![alpha_path, beta_path], Some(32 * 1024))
+            .await
+            .unwrap();
+        assert_ne!(
+            initial_source.manifest().session_id,
+            new_source.manifest().session_id
+        );
+        assert_eq!(
+            initial_source.manifest().merkle_root,
+            new_source.manifest().merkle_root
+        );
+
+        let (sender, mut sender_ch) = VeloceEndpoint::bind(loopback_opts("DedupSender"))
+            .await
+            .unwrap();
+        let (receiver, _receiver_ch) = VeloceEndpoint::bind(loopback_opts("DedupReceiver"))
+            .await
+            .unwrap();
+
+        let hosted = sender
+            .host_session(new_source.clone(), vec![sender.listen_addr()], vec![])
+            .unwrap();
+        let summary = receiver
+            .join_session(&hosted.ticket, dst_dir.path().to_path_buf(), Some(4))
+            .await
+            .unwrap();
+
+        assert_eq!(summary.total_chunks, new_source.manifest().total_chunks);
+        assert_eq!(fs::read(dst_dir.path().join("alpha.bin")).unwrap(), alpha_data);
+        assert_eq!(fs::read(dst_dir.path().join("beta.bin")).unwrap(), beta_data);
+
+        // Sender's very first progress update must already reflect the pre-verified chunks!
+        let first_prog = sender_ch.progress_rx.try_recv().unwrap();
+        assert!(
+            first_prog.chunks_verified > new_source.manifest().files[0].chunk_count,
+            "expected sender progress to start with resumed chunks, got {}",
+            first_prog.chunks_verified
         );
 
         sender.shutdown();

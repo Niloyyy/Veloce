@@ -1,8 +1,9 @@
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use bytes::Bytes;
 use core_protocol::{validate_relative_path, FileEntry, TransferManifest, TransferProfile};
 use memmap2::Mmap;
 use rand::RngCore;
@@ -46,11 +47,34 @@ pub struct ChunkPayload {
     pub data: Vec<u8>,
 }
 
+/// Zero-copy `Bytes`-backed chunk payload avoiding multi-megabyte heap copies when memory-mapped.
+#[derive(Debug, Clone)]
+pub struct ChunkBytesPayload {
+    pub chunk_index: u32,
+    pub hash: [u8; 32],
+    pub proof: Vec<[u8; 32]>,
+    pub data: Bytes,
+}
+
+struct MmapChunkSlice {
+    mmap: Arc<Mmap>,
+    start: usize,
+    end: usize,
+}
+
+impl AsRef<[u8]> for MmapChunkSlice {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        &self.mmap[self.start..self.end]
+    }
+}
+
 struct SourceFileHandle {
     path: PathBuf,
+    file: Arc<File>,
     size: u64,
     /// Zero-copy read-only memory map when available for non-empty files.
-    mmap: Option<Mmap>,
+    mmap: Option<Arc<Mmap>>,
 }
 
 /// Indexed, content-addressed sender-side file/directory source supporting concurrent
@@ -124,62 +148,56 @@ impl ChunkSource {
         let mut next_chunk_index: u32 = 0;
 
         for (rel_path, disk_path, size, mode) in collected {
-            let file = File::open(&disk_path)?;
+            let file = Arc::new(File::open(&disk_path)?);
             let mmap = if use_mmap {
-                try_map_readonly(&file, size)
+                try_map_readonly(&file, size).map(Arc::new)
             } else {
                 None
             };
-            let mut file_hasher = blake3::Hasher::new();
             let first_chunk = next_chunk_index;
-            let mut chunk_count: u32 = 0;
+            let chunk_count_u64 = if size == 0 {
+                0
+            } else {
+                size.div_ceil(chunk_size as u64)
+            };
+            let chunk_count = u32::try_from(chunk_count_u64).map_err(|_| {
+                core_protocol::ProtocolError::InvalidManifest("chunk count overflow".into())
+            })?;
 
-            if size > 0 {
-                if let Some(ref mapped) = mmap {
-                    let slice: &[u8] = mapped;
-                    for chunk in slice.chunks(chunk_size as usize) {
-                        file_hasher.update(chunk);
-                        chunk_hashes.push(MerkleTree::hash_chunk_data(chunk));
-                        chunk_count = chunk_count.checked_add(1).ok_or_else(|| {
-                            core_protocol::ProtocolError::InvalidManifest(
-                                "chunk count overflow".into(),
-                            )
-                        })?;
-                    }
+            if chunk_count > 0 {
+                let file_chunk_hashes = if let Some(ref mapped) = mmap {
+                    hash_mmap_chunks_parallel(mapped, chunk_size as usize)
                 } else {
-                    // Fallback bounded buffer read for special/unmappable filesystems.
-                    let mut reader = file;
-                    let mut buf = vec![0u8; chunk_size as usize];
-                    let mut remaining = size;
-                    while remaining > 0 {
-                        let to_read = remaining.min(chunk_size as u64) as usize;
-                        read_exact_len(&mut reader, &mut buf[..to_read])?;
-                        file_hasher.update(&buf[..to_read]);
-                        chunk_hashes.push(MerkleTree::hash_chunk_data(&buf[..to_read]));
-                        chunk_count = chunk_count.checked_add(1).ok_or_else(|| {
-                            core_protocol::ProtocolError::InvalidManifest(
-                                "chunk count overflow".into(),
-                            )
-                        })?;
-                        remaining -= to_read as u64;
-                    }
-                }
+                    hash_file_chunks_parallel(&disk_path, &file, size, chunk_size, chunk_count)?
+                };
+                chunk_hashes.extend_from_slice(&file_chunk_hashes);
             }
 
             next_chunk_index = next_chunk_index.checked_add(chunk_count).ok_or_else(|| {
                 core_protocol::ProtocolError::InvalidManifest("total chunk count overflow".into())
             })?;
 
+            let file_hash = if chunk_count == 0 {
+                *blake3::hash(b"").as_bytes()
+            } else if chunk_count == 1 {
+                chunk_hashes[first_chunk as usize]
+            } else {
+                let start = first_chunk as usize;
+                let end = next_chunk_index as usize;
+                MerkleTree::from_chunk_hashes(&chunk_hashes[start..end]).root()
+            };
+
             entries.push(FileEntry {
                 relative_path: rel_path,
                 size,
                 first_chunk,
                 chunk_count,
-                file_hash: *file_hasher.finalize().as_bytes(),
+                file_hash,
                 mode,
             });
             handles.push(SourceFileHandle {
                 path: disk_path,
+                file,
                 size,
                 mmap,
             });
@@ -245,6 +263,58 @@ impl ChunkSource {
 
     /// Reads the raw bytes, BLAKE3 hash, and Merkle inclusion proof for `chunk_index`.
     pub fn read_chunk(&self, chunk_index: u32) -> Result<ChunkPayload> {
+        let payload = self.read_chunk_bytes(chunk_index)?;
+        Ok(ChunkPayload {
+            chunk_index: payload.chunk_index,
+            hash: payload.hash,
+            proof: payload.proof,
+            data: payload.data.to_vec(),
+        })
+    }
+
+    /// Synchronous zero-copy fast path when the underlying file is memory-mapped: returns
+    /// `Some(Ok(ChunkBytesPayload))` without spawning a blocking thread or copying chunk bytes.
+    pub fn try_read_chunk_bytes_mmap(&self, chunk_index: u32) -> Option<Result<ChunkBytesPayload>> {
+        let Some((file_idx, offset, len)) = self.manifest.locate_chunk(chunk_index) else {
+            return Some(Err(StorageError::ChunkOutOfRange {
+                chunk_index,
+                total_chunks: self.manifest.total_chunks,
+            }));
+        };
+        let handle = &self.files[file_idx];
+        let mapped = handle.mmap.as_ref()?;
+        let start = offset as usize;
+        let end = start.saturating_add(len);
+        if end > mapped.len() {
+            return None;
+        }
+
+        let data = Bytes::from_owner(MmapChunkSlice {
+            mmap: Arc::clone(mapped),
+            start,
+            end,
+        });
+        let hash = self.manifest.chunk_hashes[chunk_index as usize];
+        let proof = match self.merkle_tree.generate_proof(chunk_index) {
+            Ok(p) => p,
+            Err(e) => return Some(Err(e)),
+        };
+
+        Some(Ok(ChunkBytesPayload {
+            chunk_index,
+            hash,
+            proof,
+            data,
+        }))
+    }
+
+    /// Reads a chunk as `Bytes` (zero-copy via `Arc<Mmap>` on Desktop; positional `pread` on persistent
+    /// `File` descriptor on Mobile without per-chunk `open`/`close`).
+    pub fn read_chunk_bytes(&self, chunk_index: u32) -> Result<ChunkBytesPayload> {
+        if let Some(res) = self.try_read_chunk_bytes_mmap(chunk_index) {
+            return res;
+        }
+
         let Some((file_idx, offset, len)) = self.manifest.locate_chunk(chunk_index) else {
             return Err(StorageError::ChunkOutOfRange {
                 chunk_index,
@@ -253,28 +323,34 @@ impl ChunkSource {
         };
 
         let handle = &self.files[file_idx];
-        let data = if let Some(ref mapped) = handle.mmap {
-            let start = offset as usize;
-            let end = start + len;
-            if end <= mapped.len() {
-                mapped[start..end].to_vec()
-            } else {
-                read_range_from_disk(&handle.path, offset, len)?
-            }
-        } else {
-            let _ = handle.size;
-            read_range_from_disk(&handle.path, offset, len)?
-        };
+        let _ = (&handle.path, handle.size);
+        let mut buf = vec![0u8; len];
+        read_exact_at_offset(&handle.file, offset, &mut buf)?;
 
         let hash = self.manifest.chunk_hashes[chunk_index as usize];
         let proof = self.merkle_tree.generate_proof(chunk_index)?;
 
-        Ok(ChunkPayload {
+        Ok(ChunkBytesPayload {
             chunk_index,
             hash,
             proof,
-            data,
+            data: Bytes::from(buf),
         })
+    }
+
+    /// Async zero-copy chunk reader: serves `mmap` chunks inline without thread-pool hops,
+    /// and offloads unmapped positional `pread` calls to Tokio's blocking pool.
+    pub async fn read_chunk_bytes_async(
+        self: &Arc<Self>,
+        chunk_index: u32,
+    ) -> Result<ChunkBytesPayload> {
+        if let Some(res) = self.try_read_chunk_bytes_mmap(chunk_index) {
+            return res;
+        }
+        let source = Arc::clone(self);
+        tokio::task::spawn_blocking(move || source.read_chunk_bytes(chunk_index))
+            .await
+            .map_err(|e| StorageError::JoinError(e.to_string()))?
     }
 
     /// Async wrapper for non-blocking concurrent chunk reads across QUIC streams.
@@ -295,25 +371,149 @@ fn try_map_readonly(file: &File, size: u64) -> Option<Mmap> {
     unsafe { Mmap::map(file).ok() }
 }
 
-fn read_range_from_disk(path: &Path, offset: u64, len: usize) -> Result<Vec<u8>> {
-    let mut file = File::open(path)?;
-    file.seek(SeekFrom::Start(offset))?;
-    let mut buf = vec![0u8; len];
-    read_exact_len(&mut file, &mut buf)?;
-    Ok(buf)
+/// Hashes memory-mapped file chunks across all CPU cores in a single pass.
+fn hash_mmap_chunks_parallel(slice: &[u8], chunk_size: usize) -> Vec<[u8; 32]> {
+    let total_chunks = slice.len().div_ceil(chunk_size);
+    if total_chunks <= 2 {
+        return slice
+            .chunks(chunk_size)
+            .map(MerkleTree::hash_chunk_data)
+            .collect();
+    }
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get().clamp(1, 16))
+        .unwrap_or(4)
+        .min(total_chunks);
+    let mut out = vec![[0u8; 32]; total_chunks];
+    let per_worker = total_chunks.div_ceil(workers);
+
+    std::thread::scope(|scope| {
+        for (worker_id, out_band) in out.chunks_mut(per_worker).enumerate() {
+            let start_chunk = worker_id * per_worker;
+            scope.spawn(move || {
+                for (local_i, slot) in out_band.iter_mut().enumerate() {
+                    let chunk_idx = start_chunk + local_i;
+                    let byte_start = chunk_idx * chunk_size;
+                    let byte_end = (byte_start + chunk_size).min(slice.len());
+                    *slot = MerkleTree::hash_chunk_data(&slice[byte_start..byte_end]);
+                }
+            });
+        }
+    });
+
+    out
 }
 
-fn read_exact_len(file: &mut File, buf: &mut [u8]) -> Result<()> {
-    let mut pos = 0;
-    while pos < buf.len() {
-        let n = file.read(&mut buf[pos..])?;
+/// Hashes unmapped file chunks (e.g. `TransferProfile::Mobile`) in a single parallel pass
+/// using bounded worker buffers and positional reads.
+fn hash_file_chunks_parallel(
+    disk_path: &Path,
+    file: &File,
+    total_size: u64,
+    chunk_size: u32,
+    total_chunks: u32,
+) -> Result<Vec<[u8; 32]>> {
+    let count = total_chunks as usize;
+    let chunk_len = chunk_size as usize;
+    if count <= 2 {
+        let mut out = Vec::with_capacity(count);
+        let mut buf = vec![0u8; chunk_len];
+        for idx in 0..count {
+            let offset = (idx as u64) * (chunk_size as u64);
+            let len = total_size.saturating_sub(offset).min(chunk_size as u64) as usize;
+            read_exact_at_offset(file, offset, &mut buf[..len])?;
+            out.push(MerkleTree::hash_chunk_data(&buf[..len]));
+        }
+        return Ok(out);
+    }
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get().clamp(1, 8))
+        .unwrap_or(4)
+        .min(count);
+    let mut out = vec![[0u8; 32]; count];
+    let next_idx = AtomicUsize::new(0);
+    let first_err: std::sync::Mutex<Option<StorageError>> = std::sync::Mutex::new(None);
+    let per_worker = count.div_ceil(workers);
+
+    std::thread::scope(|scope| {
+        for (worker_id, out_band) in out.chunks_mut(per_worker).enumerate() {
+            let start_chunk = worker_id * per_worker;
+            let err_ref = &first_err;
+            let abort_flag = &next_idx;
+            scope.spawn(move || {
+                #[cfg(windows)]
+                let owned_file = match File::open(disk_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        abort_flag.store(1, Ordering::Relaxed);
+                        *err_ref.lock().expect("err lock") = Some(StorageError::Io(e));
+                        return;
+                    }
+                };
+                #[cfg(windows)]
+                let reader_ref: &File = &owned_file;
+                #[cfg(not(windows))]
+                let _ = disk_path;
+                #[cfg(not(windows))]
+                let reader_ref: &File = file;
+
+                let mut buf = vec![0u8; chunk_len];
+                for (local_i, slot) in out_band.iter_mut().enumerate() {
+                    if abort_flag.load(Ordering::Relaxed) != 0 {
+                        return;
+                    }
+                    let idx = start_chunk + local_i;
+                    let offset = (idx as u64) * (chunk_size as u64);
+                    let len = total_size.saturating_sub(offset).min(chunk_size as u64) as usize;
+                    if let Err(e) = read_exact_at_offset(reader_ref, offset, &mut buf[..len]) {
+                        abort_flag.store(1, Ordering::Relaxed);
+                        *err_ref.lock().expect("err lock") = Some(StorageError::Io(e));
+                        return;
+                    }
+                    *slot = MerkleTree::hash_chunk_data(&buf[..len]);
+                }
+            });
+        }
+    });
+
+    if let Some(err) = first_err.into_inner().expect("err lock") {
+        return Err(err);
+    }
+    Ok(out)
+}
+
+#[cfg(unix)]
+fn read_exact_at_offset(file: &File, mut offset: u64, mut buf: &mut [u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    while !buf.is_empty() {
+        let n = file.read_at(buf, offset)?;
         if n == 0 {
-            return Err(StorageError::Io(std::io::Error::new(
+            return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "source file truncated during read",
-            )));
+            ));
         }
-        pos += n;
+        buf = &mut buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn read_exact_at_offset(file: &File, mut offset: u64, mut buf: &mut [u8]) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        let n = file.seek_read(buf, offset)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "source file truncated during read",
+            ));
+        }
+        buf = &mut buf[n..];
+        offset += n as u64;
     }
     Ok(())
 }

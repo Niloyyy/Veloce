@@ -9,6 +9,7 @@ const veloceApi = {
     relayAddrs?: string[];
     parallelStreams?: number;
     theme?: string;
+    runInBackground?: boolean;
     trustedPeers?: Array<{
       nodeId: string;
       shortId: string;
@@ -16,6 +17,7 @@ const veloceApi = {
       addedAt: number;
     }>;
   }) => ipcRenderer.invoke("veloce:updateSettings", settings),
+  previewTheme: (theme: string) => ipcRenderer.invoke("veloce:previewTheme", theme),
   pickFiles: () => ipcRenderer.invoke("veloce:pickFiles"),
   pickFolders: () => ipcRenderer.invoke("veloce:pickFolders"),
   pickOutputDir: () => ipcRenderer.invoke("veloce:pickOutputDir"),

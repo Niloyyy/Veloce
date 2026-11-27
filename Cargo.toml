@@ -47,8 +47,14 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
-# Keep maximum throughput optimizations on hot BLAKE3 Merkle & QUIC BBR data paths.
+# Keep maximum throughput optimizations on hot BLAKE3, AEAD crypto, & QUIC data paths.
 [profile.release.package.blake3]
+opt-level = 3
+
+[profile.release.package.bytes]
+opt-level = 3
+
+[profile.release.package.core-protocol]
 opt-level = 3
 
 [profile.release.package.core-storage]
@@ -57,5 +63,17 @@ opt-level = 3
 [profile.release.package.core-transport]
 opt-level = 3
 
+[profile.release.package.quinn]
+opt-level = 3
+
 [profile.release.package.quinn-proto]
+opt-level = 3
+
+[profile.release.package.quinn-udp]
+opt-level = 3
+
+[profile.release.package.ring]
+opt-level = 3
+
+[profile.release.package.rustls]
 opt-level = 3

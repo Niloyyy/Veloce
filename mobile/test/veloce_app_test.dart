@@ -399,6 +399,7 @@ void main() {
   testWidgets('SettingsSheet lets user pick and save custom destination folder',
       (tester) async {
     VeloceSettings? saved;
+    VeloceThemeId? previewedTheme;
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -409,6 +410,7 @@ void main() {
               exportToDownloads: true,
               themeMode: ThemeMode.dark,
             ),
+            onPreviewTheme: (t) => previewedTheme = t,
             onPickSaveFolder: () async => const PickedSaveFolder(
               uri: 'content://tree/custom',
               displayPath: 'Downloads/MyProjects',
@@ -428,6 +430,7 @@ void main() {
     await tester.ensureVisible(find.text('Nord Frost'));
     await tester.tap(find.text('Nord Frost'));
     await tester.pumpAndSettle();
+    expect(previewedTheme, VeloceThemeId.nord);
 
     await tester.ensureVisible(find.text('Save & Apply'));
     await tester.tap(find.text('Save & Apply'));
@@ -748,5 +751,32 @@ void main() {
     await tester.tap(find.text('Folder'));
     expect(openedFile, isTrue);
     expect(openedFolder, isTrue);
+  });
+
+  test('VeloceController stages files, unselects single file, and previews themes live',
+      () async {
+    final fake = FakeRustBridge();
+    final ctrl = VeloceController(bridge: fake, enableWakelock: false);
+
+    ctrl.addSelectedPaths(['/tmp/A.mp4', '/tmp/B.pdf', '/tmp/C.zip']);
+    expect(ctrl.selectedPaths, ['/tmp/A.mp4', '/tmp/B.pdf', '/tmp/C.zip']);
+
+    // Host a global ticket, then unselect mistakenly chosen file C -> invalidates stale ticket.
+    await ctrl.startSession(ctrl.selectedPaths);
+    expect(ctrl.activeSession, isNotNull);
+    ctrl.removeSelectedPath('/tmp/C.zip');
+    expect(ctrl.selectedPaths, ['/tmp/A.mp4', '/tmp/B.pdf']);
+    expect(ctrl.activeSession, isNull);
+
+    // Live theme preview overrides activeThemeId until cleared or saved.
+    expect(ctrl.activeThemeId, VeloceThemeId.obsidian);
+    ctrl.previewTheme(VeloceThemeId.emerald);
+    expect(ctrl.activeThemeId, VeloceThemeId.emerald);
+    ctrl.previewTheme(null);
+    expect(ctrl.activeThemeId, VeloceThemeId.obsidian);
+
+    ctrl.clearSelectedPaths();
+    expect(ctrl.selectedPaths, isEmpty);
+    ctrl.dispose();
   });
 }

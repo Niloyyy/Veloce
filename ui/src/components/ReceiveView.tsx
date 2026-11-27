@@ -1,9 +1,18 @@
-import { Download, FolderOpen, Radio, ShieldCheck } from "lucide-react";
+import {
+  ClipboardPaste,
+  Download,
+  FolderOpen,
+  Globe,
+  Radio,
+  ShieldCheck,
+  X,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import type { TicketPreview } from "../types/veloce";
 import { formatBytes } from "../utils/format";
 
 interface ReceiveViewProps {
+  deviceName?: string;
   outputDir: string;
   busy: boolean;
   onChangeOutputDir: () => void;
@@ -11,6 +20,7 @@ interface ReceiveViewProps {
 }
 
 export function ReceiveView({
+  deviceName,
   outputDir,
   busy,
   onChangeOutputDir,
@@ -42,13 +52,24 @@ export function ReceiveView({
           setParseError(err instanceof Error ? err.message : "Invalid session code");
         }
       }
-    }, 180);
+    }, 150);
 
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
   }, [ticketInput]);
+
+  const handlePaste = async () => {
+    try {
+      const text = (await navigator.clipboard.readText())?.trim();
+      if (text) {
+        setTicketInput(text);
+      }
+    } catch {
+      // Ignore clipboard permission errors.
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -64,18 +85,65 @@ export function ReceiveView({
     <div className="view-stack">
       <form className="panel receive-panel" onSubmit={handleSubmit}>
         <div className="panel-header">
-          <h3>Join Global Session</h3>
-          <span className="muted-xs">Resumable • Out-of-order parallel QUIC streams</span>
+          <h3 className="panel-title-inline">
+            <Globe size={16} className="accent-icon" />
+            <span>Receive Globally (From Anywhere)</span>
+          </h3>
+          <div className="panel-header-actions">
+            {ticketInput.trim().length > 0 && (
+              <button
+                className="btn-secondary btn-sm"
+                type="button"
+                onClick={() => setTicketInput("")}
+              >
+                <X size={13} />
+                <span>Clear</span>
+              </button>
+            )}
+            <button
+              className="btn-secondary btn-sm"
+              type="button"
+              onClick={handlePaste}
+              title="Paste session code from clipboard"
+            >
+              <ClipboardPaste size={13} />
+              <span>Paste Code</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="how-it-works-grid receive-steps">
+          <div className="step-chip">
+            <span className="step-num">1</span>
+            <div>
+              <strong>Sender Generates Code</strong>
+              <span className="muted-xs">Sender clicks Generate Global Code in Send</span>
+            </div>
+          </div>
+          <div className="step-chip">
+            <span className="step-num">2</span>
+            <div>
+              <strong>Paste veloce1… Code</strong>
+              <span className="muted-xs">Verifies BLAKE3 Merkle root before downloading</span>
+            </div>
+          </div>
+          <div className="step-chip">
+            <span className="step-num">3</span>
+            <div>
+              <strong>Seamless Auto-Resume</strong>
+              <span className="muted-xs">Skips any chunks already received earlier</span>
+            </div>
+          </div>
         </div>
 
         <label className="input-label" htmlFor="ticket-input">
-          Paste Session Code (<code>veloce1...</code>)
+          Session Code (<code>veloce1...</code>)
         </label>
         <textarea
           id="ticket-input"
           className="ticket-textarea"
           rows={3}
-          placeholder="veloce1..."
+          placeholder="Paste veloce1... code from the sender here"
           value={ticketInput}
           onChange={(e) => setTicketInput(e.target.value)}
         />
@@ -87,27 +155,29 @@ export function ReceiveView({
             <div className="preview-row">
               <span className="merkle-pill">
                 <ShieldCheck size={13} />
-                Valid Ticket
+                Verified Ticket
               </span>
               <strong>
-                {preview.fileCount} file(s) • {formatBytes(preview.totalSize)}
+                {preview.fileCount} item(s) • {formatBytes(preview.totalSize)}
               </strong>
             </div>
             <div className="preview-meta muted-xs">
               <span>Sender: {preview.senderShortId}</span>
               <span>•</span>
               <span>
-                {preview.directAddrs.length} direct hint(s), {preview.relayHints.length} relay(s)
+                {preview.directAddrs.length} direct endpoint(s), {preview.relayHints.length} relay(s)
               </span>
             </div>
           </div>
         )}
 
         <div className="dir-picker-row">
-          <span className="muted-xs truncate">Destination: {outputDir || "Not selected"}</span>
+          <span className="muted-xs truncate" title={outputDir}>
+            Save to: {outputDir || "Not selected"}
+          </span>
           <button className="btn-secondary btn-sm" type="button" onClick={onChangeOutputDir}>
             <FolderOpen size={14} />
-            <span>Choose Folder</span>
+            <span>Change Folder</span>
           </button>
         </div>
 
@@ -125,10 +195,12 @@ export function ReceiveView({
         <div className="pulse-dot" />
         <Radio size={18} />
         <div>
-          <strong>Listening for Incoming LAN Transfers</strong>
+          <strong>
+            Ready on Nearby Wi-Fi / LAN{deviceName ? ` as "${deviceName}"` : ""}
+          </strong>
           <p className="muted-xs">
-            Nearby devices on your network can discover this machine automatically. Incoming offers
-            require your explicit approval before any data is written.
+            No code needed on the same Wi-Fi — select this device on the sender&apos;s Nearby list.
+            Works in the background from your system tray.
           </p>
         </div>
       </div>

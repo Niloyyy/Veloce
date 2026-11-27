@@ -23,12 +23,13 @@ use crate::discovery::{
 };
 use crate::error::{Result, TransportError};
 use crate::identity::{build_bbr_transport_config_for_profile, peer_node_id, PeerIdentity};
+use crate::lan_lane::LanTcpLane;
 use crate::magic_socket::{MagicUdpSocket, PathChangeEvent};
 use crate::nat::NatCoordinator;
 use crate::port_map::{try_map_udp_port, PortMappingLease};
 use crate::transfer::{
-    graceful_close, run_receiver_session_with_profile, run_sender_session, send_and_receive_hello,
-    TransferProgress, TransferSummary, DEFAULT_PARALLEL_STREAMS,
+    graceful_close, run_receiver_session_with_lan_lane, run_sender_session_with_lan_lane,
+    send_and_receive_hello, TransferProgress, TransferSummary, DEFAULT_PARALLEL_STREAMS,
 };
 
 /// Decision returned by the application / UI for an incoming LAN push transfer offer.
@@ -94,6 +95,7 @@ pub struct VeloceEndpoint {
     relay_hosts: Vec<String>,
     endpoint: Endpoint,
     magic_socket: Arc<MagicUdpSocket>,
+    lan_lane: Option<Arc<LanTcpLane>>,
     nat: Arc<NatCoordinator>,
     transport_config: Arc<TransportConfig>,
     listen_addr: SocketAddr,
@@ -201,6 +203,13 @@ impl VeloceEndpoint {
         }
 
         let cancel = CancellationToken::new();
+        let lan_lane = LanTcpLane::try_bind(
+            opts.bind_addr,
+            listen_addr.port(),
+            opts.profile,
+            &identity,
+            &cancel,
+        );
         let nat = NatCoordinator::start(
             Arc::clone(&magic_socket),
             signaling_rx,
@@ -247,6 +256,7 @@ impl VeloceEndpoint {
             relay_hosts: opts.relay_hosts,
             endpoint,
             magic_socket,
+            lan_lane,
             nat,
             transport_config,
             listen_addr,
@@ -262,6 +272,7 @@ impl VeloceEndpoint {
         });
 
         node.spawn_accept_loop(offers_tx, node.default_parallel_streams);
+        node.spawn_lan_liveness_loop();
 
         Ok((
             node,
@@ -307,6 +318,13 @@ impl VeloceEndpoint {
             .as_ref()
             .map(LanDiscovery::list_peers)
             .unwrap_or_default()
+    }
+
+    /// Updates explicit platform LAN IP overrides (e.g., on mobile Wi-Fi <-> cellular switch).
+    pub fn refresh_network(&self, override_lan_addrs: Vec<IpAddr>) {
+        if let Some(ref disc) = self.discovery {
+            disc.update_overrides(override_lan_addrs);
+        }
     }
 
     pub fn subscribe_discovery(&self) -> Option<broadcast::Receiver<DiscoveryEvent>> {
@@ -494,6 +512,17 @@ impl VeloceEndpoint {
         self.host_session(source, extra_addrs, relay_hints)
     }
 
+    /// Pre-registers a cancellation token for `transfer_id` synchronously before spawning
+    /// background join tasks so immediate `pause_transfer` / `cancel_transfer` calls never race.
+    pub fn prepare_transfer_cancellation(&self, transfer_id: &str) -> CancellationToken {
+        let cancel = self.cancel.child_token();
+        self.active_cancellations
+            .lock()
+            .expect("cancellations lock poisoned")
+            .insert(transfer_id.to_string(), cancel.clone());
+        cancel
+    }
+
     /// Smart global session joiner:
     /// 1. Tries direct LAN / mDNS addresses first (unless `force_relay` is enabled).
     /// 2. Coordinates STUN + simultaneous UDP hole-punching via relay hints.
@@ -505,8 +534,82 @@ impl VeloceEndpoint {
         output_dir: PathBuf,
         parallel_streams: Option<usize>,
     ) -> Result<TransferSummary> {
+        let transfer_id = hex::encode(&ticket.merkle_root[..8]);
+        let cancel = self.prepare_transfer_cancellation(&transfer_id);
+        self.join_session_with_cancel(ticket, output_dir, parallel_streams, cancel)
+            .await
+    }
+
+    /// Joins a global session using a pre-registered `CancellationToken`, automatically
+    /// reconnecting and resuming missing chunks if a transient network/packet drop interrupts
+    /// an in-progress transfer.
+    pub async fn join_session_with_cancel(
+        &self,
+        ticket: &SessionTicket,
+        output_dir: PathBuf,
+        parallel_streams: Option<usize>,
+        cancel: CancellationToken,
+    ) -> Result<TransferSummary> {
+        let root_prefix = hex::encode(&ticket.merkle_root[..8]);
+        let state_path = output_dir.join(format!(".veloce-resume-{root_prefix}.state"));
+        let retry_delays_ms = [250u64, 600, 1200];
+        let mut attempt = 0usize;
+
+        loop {
+            match self
+                .join_session_once(ticket, output_dir.clone(), parallel_streams, cancel.clone())
+                .await
+            {
+                Ok(summary) => return Ok(summary),
+                Err(err) => {
+                    let is_transient = matches!(
+                        err,
+                        TransportError::Connection(_)
+                            | TransportError::Timeout(_)
+                            | TransportError::Connect(_)
+                            | TransportError::Write(_)
+                            | TransportError::Read(_)
+                            | TransportError::Io(_)
+                            | TransportError::NatTraversal(_)
+                    );
+                    if cancel.is_cancelled()
+                        || !is_transient
+                        || attempt >= retry_delays_ms.len()
+                        || !state_path.exists()
+                    {
+                        return Err(err);
+                    }
+                    let backoff = Duration::from_millis(retry_delays_ms[attempt]);
+                    attempt += 1;
+                    tracing::warn!(
+                        transfer_id = %root_prefix,
+                        attempt,
+                        error = %err,
+                        "Transient transfer interruption detected; reconnecting to resume missing chunks"
+                    );
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            return Err(TransportError::Cancelled("transfer cancelled".into()));
+                        }
+                        _ = tokio::time::sleep(backoff) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    async fn join_session_once(
+        &self,
+        ticket: &SessionTicket,
+        output_dir: PathBuf,
+        parallel_streams: Option<usize>,
+        cancel: CancellationToken,
+    ) -> Result<TransferSummary> {
         let streams = parallel_streams.unwrap_or(self.default_parallel_streams);
         let transfer_id = hex::encode(&ticket.merkle_root[..8]);
+        if cancel.is_cancelled() {
+            return Err(TransportError::Cancelled("transfer cancelled".into()));
+        }
 
         // Resolve relay hints from ticket + configured DNS relay_hosts + pre-resolved relays.
         let mut relays: Vec<SocketAddr> = Vec::new();
@@ -583,6 +686,10 @@ impl VeloceEndpoint {
                 }
 
                 while let Some(joined) = racers.join_next().await {
+                    if cancel.is_cancelled() {
+                        racers.abort_all();
+                        return Err(TransportError::Cancelled("transfer cancelled".into()));
+                    }
                     if let Ok(Ok((addr, conn))) = joined {
                         racers.abort_all();
                         let conn_type = classify_socket_addr(addr);
@@ -600,6 +707,7 @@ impl VeloceEndpoint {
                                 streams,
                                 conn_type,
                                 Vec::new(),
+                                cancel,
                             )
                             .await;
                     }
@@ -607,9 +715,16 @@ impl VeloceEndpoint {
             }
         }
 
+        if cancel.is_cancelled() {
+            return Err(TransportError::Cancelled("transfer cancelled".into()));
+        }
+
         // Step 2 & 3: NAT traversal via relay (UDP hole-punching -> encrypted relay fallback).
         let mut last_err: Option<TransportError> = None;
         for relay_addr in relays {
+            if cancel.is_cancelled() {
+                return Err(TransportError::Cancelled("transfer cancelled".into()));
+            }
             match self
                 .nat
                 .resolve_peer_via_relay(
@@ -644,6 +759,7 @@ impl VeloceEndpoint {
                                     streams,
                                     plan.connection_type,
                                     plan.upgrade_candidates,
+                                    cancel,
                                 )
                                 .await;
                         }
@@ -675,6 +791,11 @@ impl VeloceEndpoint {
         connection_type: ConnectionType,
     ) -> Result<TransferSummary> {
         let transfer_id = hex::encode(&ticket.merkle_root[..8]);
+        let cancel = self.cancel.child_token();
+        self.active_cancellations
+            .lock()
+            .expect("cancellations lock poisoned")
+            .insert(transfer_id.clone(), cancel.clone());
         let conn = self
             .connect_verified_with_timeout(target_addr, Some(ticket.node_id), Duration::from_secs(15))
             .await?;
@@ -691,6 +812,7 @@ impl VeloceEndpoint {
             parallel_streams,
             connection_type,
             Vec::new(),
+            cancel,
         )
         .await
     }
@@ -705,12 +827,12 @@ impl VeloceEndpoint {
         parallel_streams: usize,
         initial_connection_type: ConnectionType,
         upgrade_candidates: Vec<SocketAddr>,
+        cancel: CancellationToken,
     ) -> Result<TransferSummary> {
-        let cancel = self.cancel.child_token();
-        self.active_cancellations
-            .lock()
-            .expect("cancellations lock poisoned")
-            .insert(transfer_id.clone(), cancel.clone());
+        if cancel.is_cancelled() {
+            graceful_close(&conn).await;
+            return Err(TransportError::Cancelled("transfer cancelled".into()));
+        }
 
         let (mut ctrl_send, mut ctrl_recv) = conn.open_bi().await?;
         let mut sm = HandshakeStateMachine::new(SessionRole::Receiver, Some(ticket.session_token));
@@ -781,7 +903,8 @@ impl VeloceEndpoint {
             );
         }
 
-        let summary = run_receiver_session_with_profile(
+        let was_cancelled_ref = cancel.clone();
+        let summary = run_receiver_session_with_lan_lane(
             transfer_id.clone(),
             conn.clone(),
             ctrl_send,
@@ -791,6 +914,7 @@ impl VeloceEndpoint {
             output_dir,
             parallel_streams,
             self.profile,
+            Some(&self.identity),
             ct,
             Some(self.progress_tx.clone()),
             cancel,
@@ -799,10 +923,12 @@ impl VeloceEndpoint {
 
         upgrade_cancel.cancel();
         watcher_handle.abort();
-        self.active_cancellations
-            .lock()
-            .expect("cancellations lock poisoned")
-            .remove(&transfer_id);
+        if !was_cancelled_ref.is_cancelled() {
+            self.active_cancellations
+                .lock()
+                .expect("cancellations lock poisoned")
+                .remove(&transfer_id);
+        }
         graceful_close(&conn).await;
         summary
     }
@@ -815,6 +941,30 @@ impl VeloceEndpoint {
         source: Arc<ChunkSource>,
         connection_type: ConnectionType,
     ) -> Result<TransferSummary> {
+        self.push_to_peer_addrs(
+            target_node_id,
+            &[target_addr],
+            source,
+            connection_type,
+        )
+        .await
+    }
+
+    /// Races all candidate LAN addresses of a discovered peer in parallel (Happy Eyeballs)
+    /// and streams the outgoing push session over the fastest responding interface.
+    pub async fn push_to_peer_addrs(
+        &self,
+        target_node_id: Option<NodeId>,
+        target_addrs: &[SocketAddr],
+        source: Arc<ChunkSource>,
+        connection_type: ConnectionType,
+    ) -> Result<TransferSummary> {
+        if target_addrs.is_empty() {
+            return Err(TransportError::Connection(
+                "LAN peer has no candidate socket addresses".into(),
+            ));
+        }
+
         let transfer_id = hex::encode(&source.manifest().session_id[..8]);
         let cancel = self.cancel.child_token();
         self.active_cancellations
@@ -822,9 +972,63 @@ impl VeloceEndpoint {
             .expect("cancellations lock poisoned")
             .insert(transfer_id.clone(), cancel.clone());
 
-        let conn = self
-            .connect_verified_with_timeout(target_addr, target_node_id, Duration::from_secs(15))
-            .await?;
+        let conn = if target_addrs.len() == 1 {
+            self.connect_verified_with_timeout(target_addrs[0], target_node_id, Duration::from_secs(15))
+                .await?
+        } else {
+            let supports_v4 = self.magic_socket.supports_ipv4();
+            let supports_v6 = self.magic_socket.supports_ipv6();
+            let client_cfg = self
+                .identity
+                .build_client_config(target_node_id, Arc::clone(&self.transport_config))?;
+            let server_name = target_node_id
+                .map(|id| format!("{}.veloce.local", id.to_base32()))
+                .unwrap_or_else(|| "veloce.local".into());
+
+            let mut racers: JoinSet<Result<quinn::Connection>> = JoinSet::new();
+            for &addr in target_addrs
+                .iter()
+                .filter(|a| (a.is_ipv4() && supports_v4) || (a.is_ipv6() && supports_v6))
+                .take(8)
+            {
+                let ep = self.endpoint.clone();
+                let cfg = client_cfg.clone();
+                let sni = server_name.clone();
+                racers.spawn(async move {
+                    let connecting = ep.connect_with(cfg, addr, &sni)?;
+                    let c = tokio::time::timeout(Duration::from_secs(15), connecting)
+                        .await
+                        .map_err(|_| TransportError::Timeout(format!("QUIC connect to {addr}")))??;
+                    Ok(c)
+                });
+            }
+
+            let mut connected: Option<quinn::Connection> = None;
+            let mut last_err: Option<TransportError> = None;
+            while let Some(joined) = racers.join_next().await {
+                match joined {
+                    Ok(Ok(c)) => {
+                        racers.abort_all();
+                        connected = Some(c);
+                        break;
+                    }
+                    Ok(Err(e)) => last_err = Some(e),
+                    Err(e) => last_err = Some(TransportError::Connection(e.to_string())),
+                }
+            }
+            match connected {
+                Some(c) => c,
+                None => {
+                    self.active_cancellations
+                        .lock()
+                        .expect("cancellations lock poisoned")
+                        .remove(&transfer_id);
+                    return Err(last_err.unwrap_or_else(|| {
+                        TransportError::Connection("failed to connect to LAN peer".into())
+                    }));
+                }
+            }
+        };
         let (mut ctrl_send, mut ctrl_recv) = conn.open_bi().await?;
         let mut sm = HandshakeStateMachine::new(SessionRole::Sender, None);
 
@@ -840,7 +1044,7 @@ impl VeloceEndpoint {
         .await?;
 
         let ct = Arc::new(Mutex::new(connection_type));
-        let summary = run_sender_session(
+        let summary = run_sender_session_with_lan_lane(
             transfer_id.clone(),
             conn.clone(),
             ctrl_send,
@@ -848,6 +1052,7 @@ impl VeloceEndpoint {
             sm,
             source,
             self.device_name.clone(),
+            self.lan_lane.as_deref(),
             ct,
             Some(self.progress_tx.clone()),
             cancel,
@@ -944,6 +1149,9 @@ impl VeloceEndpoint {
                 });
             }
         }
+        if let Some(ref lane) = self.lan_lane {
+            lane.shutdown();
+        }
         if let Some(ref disc) = self.discovery {
             disc.shutdown();
         }
@@ -1001,6 +1209,66 @@ impl VeloceEndpoint {
             .await
             .map_err(|_| TransportError::Timeout(format!("QUIC connect to {addr}")))??;
         Ok(conn)
+    }
+
+    fn spawn_lan_liveness_loop(self: &Arc<Self>) {
+        if self.discovery.is_none() {
+            return;
+        }
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut missed_counts: HashMap<NodeId, u8> = HashMap::new();
+            let mut interval = tokio::time::interval(Duration::from_millis(750));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    _ = this.cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let Some(ref disc) = this.discovery else { break };
+                        let peers = disc.list_peers();
+                        missed_counts.retain(|id, _| peers.iter().any(|p| &p.node_id == id));
+
+                        if peers.is_empty() || this.magic_socket.is_force_relay() {
+                            continue;
+                        }
+
+                        let mut probes = JoinSet::new();
+                        for peer in peers {
+                            let nat = Arc::clone(&this.nat);
+                            probes.spawn(async move {
+                                let ack = nat
+                                    .probe_peer_once(
+                                        peer.node_id,
+                                        &peer.addresses,
+                                        Duration::from_millis(450),
+                                    )
+                                    .await;
+                                (peer.node_id, ack.is_some())
+                            });
+                        }
+
+                        while let Some(Ok((peer_id, alive))) = probes.join_next().await {
+                            if alive {
+                                missed_counts.remove(&peer_id);
+                                disc.touch_peer(&peer_id);
+                            } else {
+                                let misses = missed_counts.entry(peer_id).or_insert(0);
+                                *misses = misses.saturating_add(1);
+                                let stale = disc
+                                    .last_seen_elapsed(&peer_id)
+                                    .map(|d| d >= Duration::from_millis(1300))
+                                    .unwrap_or(true);
+                                if *misses >= 2 && stale {
+                                    missed_counts.remove(&peer_id);
+                                    disc.evict_peer(&peer_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 
     fn spawn_accept_loop(
@@ -1128,7 +1396,7 @@ impl VeloceEndpoint {
             );
             let tid = hosted.transfer_id.clone();
             let is_paused_ref = Arc::clone(&hosted.paused);
-            let res = run_sender_session(
+            let res = run_sender_session_with_lan_lane(
                 tid.clone(),
                 conn.clone(),
                 ctrl_send,
@@ -1136,6 +1404,7 @@ impl VeloceEndpoint {
                 sm,
                 hosted.source,
                 self.device_name.clone(),
+                self.lan_lane.as_deref(),
                 ct,
                 Some(self.progress_tx.clone()),
                 hosted.cancel,
@@ -1160,6 +1429,7 @@ impl VeloceEndpoint {
                 }
                 Err(_) => {}
             }
+            graceful_close(&conn).await;
             res?;
         } else {
             let mut sm = HandshakeStateMachine::new(SessionRole::Receiver, None);
@@ -1248,7 +1518,7 @@ impl VeloceEndpoint {
                         connection_type: conn_type,
                     });
                     let ct = Arc::new(Mutex::new(conn_type));
-                    let res = run_receiver_session_with_profile(
+                    let res = run_receiver_session_with_lan_lane(
                         transfer_id.clone(),
                         conn.clone(),
                         ctrl_send,
@@ -1258,6 +1528,7 @@ impl VeloceEndpoint {
                         output_dir,
                         parallel_streams,
                         self.profile,
+                        Some(&self.identity),
                         ct,
                         Some(self.progress_tx.clone()),
                         cancel,
@@ -1283,6 +1554,7 @@ impl VeloceEndpoint {
                             });
                         }
                     }
+                    graceful_close(&conn).await;
                     res?;
                 }
                 IncomingOfferDecision::Reject { reason } => {

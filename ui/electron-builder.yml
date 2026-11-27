@@ -23,6 +23,8 @@ files:
 extraResources:
   - from: native/veloce_core.node
     to: native/veloce_core.node
+  - from: build/icon.png
+    to: icon.png
 
 linux:
   icon: build/icon.png

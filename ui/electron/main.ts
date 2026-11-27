@@ -1,4 +1,15 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  Notification,
+  powerSaveBlocker,
+  shell,
+  Tray,
+} from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -75,6 +86,7 @@ export interface DesktopSettings {
   relayAddrs: string[];
   parallelStreams: number;
   theme: DesktopThemeId;
+  runInBackground: boolean;
   trustedPeers: TrustedPeer[];
 }
 
@@ -88,11 +100,16 @@ interface PersistedDesktopSettings extends DesktopSettings {
 const DETECTED_DEVICE_NAME = detectHardwareModelName();
 
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
 let nativeAddon: NativeAddon | null = null;
 let client: NativeClient | null = null;
 let initError: string | null = null;
 let currentSettings: DesktopSettings = defaultSettings();
 let deviceNameCustom = false;
+let isQuitting = false;
+let shownBackgroundHint = false;
+let powerBlockerId: number | null = null;
+const activeTransferIds = new Set<string>();
 
 function defaultSettings(): DesktopSettings {
   const envRelays = (process.env.VELOCE_RELAY_ADDRS || "")
@@ -106,6 +123,7 @@ function defaultSettings(): DesktopSettings {
     relayAddrs: envRelays,
     parallelStreams: 8,
     theme: "dark",
+    runInBackground: true,
     trustedPeers: [],
   };
 }
@@ -142,6 +160,8 @@ function sanitizeSettings(raw: Partial<DesktopSettings>, fallback: DesktopSettin
     typeof raw.theme === "string" && VALID_THEMES.has(raw.theme)
       ? (raw.theme as DesktopThemeId)
       : fallback.theme;
+  const runInBackground =
+    typeof raw.runInBackground === "boolean" ? raw.runInBackground : fallback.runInBackground;
 
   const trustedPeers: TrustedPeer[] = Array.isArray(raw.trustedPeers)
     ? Array.from(
@@ -177,6 +197,7 @@ function sanitizeSettings(raw: Partial<DesktopSettings>, fallback: DesktopSettin
     relayAddrs,
     parallelStreams,
     theme,
+    runInBackground,
     trustedPeers,
   };
 }
@@ -262,6 +283,47 @@ function buildStatusPayload() {
   };
 }
 
+function syncPowerSaveBlocker(): void {
+  if (activeTransferIds.size > 0) {
+    if (powerBlockerId === null || !powerSaveBlocker.isStarted(powerBlockerId)) {
+      try {
+        powerBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+      } catch {
+        powerBlockerId = null;
+      }
+    }
+  } else if (powerBlockerId !== null) {
+    try {
+      if (powerSaveBlocker.isStarted(powerBlockerId)) {
+        powerSaveBlocker.stop(powerBlockerId);
+      }
+    } catch {
+      // Ignore stop errors.
+    }
+    powerBlockerId = null;
+  }
+}
+
+function notifyDesktop(title: string, body: string, onClickOpen = false): void {
+  try {
+    if (!Notification.isSupported()) return;
+    const notif = new Notification({
+      title,
+      body,
+      icon: resolveAppIconPath(),
+      silent: true,
+    });
+    if (onClickOpen) {
+      notif.on("click", () => {
+        showMainWindow();
+      });
+    }
+    notif.show();
+  } catch {
+    // Ignore desktop environments without notification daemons.
+  }
+}
+
 async function initNativeEngine(): Promise<void> {
   if (client) {
     try {
@@ -271,6 +333,8 @@ async function initNativeEngine(): Promise<void> {
     }
     client = null;
   }
+  activeTransferIds.clear();
+  syncPowerSaveBlocker();
   initError = null;
 
   const addonPath = resolveNativeAddonPath();
@@ -295,16 +359,71 @@ async function initNativeEngine(): Promise<void> {
     });
 
     created.onEvent((eventJson: string) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        try {
-          mainWindow.webContents.send("veloce:event", JSON.parse(eventJson));
-        } catch {
-          // Ignore malformed event payloads.
+      try {
+        const parsed = JSON.parse(eventJson) as {
+          type?: string;
+          transferId?: string;
+          senderNodeId?: string;
+          senderName?: string;
+          fileCount?: number;
+        };
+
+        if (parsed.type === "TransferProgress" || parsed.type === "TransferResumed") {
+          if (parsed.transferId) {
+            activeTransferIds.add(parsed.transferId);
+            syncPowerSaveBlocker();
+            refreshTrayMenu();
+          }
+        } else if (
+          parsed.type === "TransferCompleted" ||
+          parsed.type === "TransferFailed" ||
+          parsed.type === "TransferPaused"
+        ) {
+          if (parsed.transferId) {
+            activeTransferIds.delete(parsed.transferId);
+            syncPowerSaveBlocker();
+            refreshTrayMenu();
+          }
+        } else if (parsed.type === "IncomingOffer") {
+          const isHidden = !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible();
+          const isTrusted = currentSettings.trustedPeers.some(
+            (p) => p.nodeId === parsed.senderNodeId,
+          );
+          if (isHidden) {
+            if (isTrusted && currentSettings.downloadDir) {
+              notifyDesktop(
+                "Veloce Background Transfer",
+                `Auto-receiving ${parsed.fileCount ?? 1} item(s) from ${parsed.senderName ?? "trusted device"}`,
+                true,
+              );
+              // Ensure renderer also receives it if alive; if window was destroyed, accept directly!
+              if (!mainWindow || mainWindow.isDestroyed()) {
+                if (parsed.transferId) {
+                  created.acceptIncomingTransfer(parsed.transferId, currentSettings.downloadDir);
+                }
+                return;
+              }
+            } else {
+              showMainWindow();
+              notifyDesktop(
+                "Incoming Veloce Transfer",
+                `${parsed.senderName ?? "Nearby device"} wants to send ${parsed.fileCount ?? 1} item(s)`,
+                true,
+              );
+            }
+          }
         }
+
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("veloce:event", parsed);
+        }
+      } catch {
+        // Ignore malformed event payloads.
       }
     });
 
     client = created;
+    refreshTrayMenu();
   } catch (err) {
     initError = err instanceof Error ? err.message : String(err);
   }
@@ -312,6 +431,8 @@ async function initNativeEngine(): Promise<void> {
 
 function resolveAppIconPath(): string | undefined {
   const candidates = [
+    path.join(process.resourcesPath || "", "icon.png"),
+    path.join(path.dirname(process.execPath), "icon.png"),
     path.join(__dirname, "..", "build", "icon.png"),
     path.join(process.resourcesPath || "", "build", "icon.png"),
   ];
@@ -323,15 +444,106 @@ function resolveAppIconPath(): string | undefined {
   return undefined;
 }
 
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function refreshTrayMenu(): void {
+  if (!tray) return;
+  const activeCount = activeTransferIds.size;
+  const statusLine =
+    activeCount > 0
+      ? `Active transfers: ${activeCount}`
+      : `Visible as ${currentSettings.deviceName}`;
+
+  tray.setToolTip(`Veloce — ${statusLine}`);
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: `Veloce • ${currentSettings.deviceName}`,
+      enabled: false,
+    },
+    {
+      label: statusLine,
+      enabled: false,
+    },
+    { type: "separator" },
+    {
+      label: "Open Veloce",
+      click: () => showMainWindow(),
+    },
+    {
+      label: "Keep Running in Background",
+      type: "checkbox",
+      checked: currentSettings.runInBackground,
+      click: (item) => {
+        currentSettings = {
+          ...currentSettings,
+          runInBackground: item.checked,
+        };
+        try {
+          savePersistedSettings(currentSettings);
+        } catch {
+          // Ignore persistence errors from tray toggle.
+        }
+        refreshTrayMenu();
+      },
+    },
+    { type: "separator" },
+    {
+      label: "Quit Veloce",
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    },
+  ]);
+  tray.setContextMenu(contextMenu);
+}
+
+function ensureTray(): void {
+  if (tray) {
+    refreshTrayMenu();
+    return;
+  }
+  try {
+    const iconPath = resolveAppIconPath();
+    const img = iconPath
+      ? nativeImage.createFromPath(iconPath).resize({ width: 20, height: 20 })
+      : nativeImage.createEmpty();
+    tray = new Tray(img);
+    tray.on("click", () => {
+      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && mainWindow.isFocused()) {
+        mainWindow.hide();
+      } else {
+        showMainWindow();
+      }
+    });
+    refreshTrayMenu();
+  } catch {
+    tray = null;
+  }
+}
+
 function createWindow(): void {
   const iconPath = resolveAppIconPath();
+  Menu.setApplicationMenu(null);
+
   mainWindow = new BrowserWindow({
-    width: 1080,
+    width: 1100,
     height: 760,
     minWidth: 820,
     minHeight: 620,
-    title: "Veloce — P2P File Transfer",
+    title: "Veloce",
     icon: iconPath,
+    autoHideMenuBar: true,
     backgroundColor: THEME_BG_COLORS[currentSettings.theme] ?? "#0c0f14",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -340,6 +552,7 @@ function createWindow(): void {
       sandbox: false,
     },
   });
+  mainWindow.setMenuBarVisibility(false);
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) {
@@ -347,6 +560,21 @@ function createWindow(): void {
   } else {
     void mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
+
+  mainWindow.on("close", (event) => {
+    if (!isQuitting && currentSettings.runInBackground && tray) {
+      event.preventDefault();
+      mainWindow?.hide();
+      if (!shownBackgroundHint) {
+        shownBackgroundHint = true;
+        notifyDesktop(
+          "Veloce is running in the background",
+          "Ready to receive LAN & Global transfers from your system tray.",
+          true,
+        );
+      }
+    }
+  });
 
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -357,6 +585,15 @@ function registerIpcHandlers(): void {
   ipcMain.handle("veloce:getStatus", () => buildStatusPayload());
 
   ipcMain.handle("veloce:getSettings", () => currentSettings);
+
+  ipcMain.handle("veloce:previewTheme", (_event, rawTheme: string) => {
+    if (typeof rawTheme === "string" && VALID_THEMES.has(rawTheme)) {
+      const bg = THEME_BG_COLORS[rawTheme as DesktopThemeId];
+      if (bg && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setBackgroundColor(bg);
+      }
+    }
+  });
 
   ipcMain.handle(
     "veloce:updateSettings",
@@ -372,6 +609,9 @@ function registerIpcHandlers(): void {
       if (typeof partial.deviceName === "string") {
         deviceNameCustom = next.deviceName !== DETECTED_DEVICE_NAME;
       }
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setBackgroundColor(THEME_BG_COLORS[next.theme] ?? "#0c0f14");
+      }
       try {
         savePersistedSettings(next);
       } catch (err) {
@@ -382,6 +622,8 @@ function registerIpcHandlers(): void {
 
       if (needsRestart) {
         await initNativeEngine();
+      } else {
+        refreshTrayMenu();
       }
 
       return {
@@ -571,34 +813,71 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("veloce:pauseTransfer", (_event, transferId: string) => {
     if (!client) return false;
+    activeTransferIds.delete(transferId);
+    syncPowerSaveBlocker();
+    refreshTrayMenu();
     return client.pauseTransfer(transferId);
   });
 
   ipcMain.handle("veloce:resumeTransfer", async (_event, transferId: string) => {
     if (!client) return false;
-    return client.resumeTransfer(transferId);
+    const resumed = await client.resumeTransfer(transferId);
+    if (resumed) {
+      activeTransferIds.add(transferId);
+      syncPowerSaveBlocker();
+      refreshTrayMenu();
+    }
+    return resumed;
   });
 
   ipcMain.handle("veloce:cancelTransfer", (_event, transferId: string) => {
     if (!client) return false;
+    activeTransferIds.delete(transferId);
+    syncPowerSaveBlocker();
+    refreshTrayMenu();
     return client.cancelTransfer(transferId);
   });
 }
 
-app.whenReady().then(async () => {
-  currentSettings = loadPersistedSettings();
-  await initNativeEngine();
-  registerIpcHandlers();
-  createWindow();
-
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
+const singleInstanceLock = app.requestSingleInstanceLock();
+if (!singleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    showMainWindow();
   });
+
+  app.whenReady().then(async () => {
+    currentSettings = loadPersistedSettings();
+    ensureTray();
+    await initNativeEngine();
+    registerIpcHandlers();
+    createWindow();
+
+    app.on("activate", () => {
+      showMainWindow();
+    });
+  });
+}
+
+app.on("before-quit", () => {
+  isQuitting = true;
+  activeTransferIds.clear();
+  syncPowerSaveBlocker();
+  if (client) {
+    try {
+      client.shutdown();
+    } catch {
+      // Ignore shutdown errors on exit.
+    }
+    client = null;
+  }
 });
 
 app.on("window-all-closed", () => {
+  if (!isQuitting && currentSettings.runInBackground && tray) {
+    return;
+  }
   if (client) {
     client.shutdown();
     client = null;

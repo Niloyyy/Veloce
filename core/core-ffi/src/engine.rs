@@ -549,19 +549,26 @@ impl VeloceEngine {
         } else {
             vec![listen]
         };
-        // Only run external RFC 5389 STUN when bound on an unspecified (0.0.0.0 / ::) interface
-        // and not targeting a local LAN push, keeping unit tests on 127.0.0.1 instant & deterministic.
-        let allow_public_stun = listen.ip().is_unspecified() && target_peer_node_id.is_none();
+        // Direct LAN peer pushes skip external relay DNS / STUN discovery round-trips completely
+        // so the incoming offer appears on the target LAN device with zero network setup delay.
+        let is_lan_push = target_peer_node_id
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
+        let allow_public_stun = listen.ip().is_unspecified() && !is_lan_push;
 
-        let hosted = self
-            .endpoint
-            .host_session_async(
-                Arc::clone(&source),
-                extra_addrs,
-                relay_hints,
-                allow_public_stun,
-            )
-            .await?;
+        let hosted = if is_lan_push {
+            self.endpoint
+                .host_session(Arc::clone(&source), extra_addrs, relay_hints)?
+        } else {
+            self.endpoint
+                .host_session_async(
+                    Arc::clone(&source),
+                    extra_addrs,
+                    relay_hints,
+                    allow_public_stun,
+                )
+                .await?
+        };
 
         let result = StartSessionResultDto {
             transfer_id: hosted.transfer_id.clone(),
@@ -609,9 +616,12 @@ impl VeloceEngine {
                     .ok_or_else(|| {
                         FfiError::InvalidArgument(format!("LAN peer '{trimmed}' not discovered"))
                     })?;
-                let target_addr = *target_peer.addresses.first().ok_or_else(|| {
-                    FfiError::InvalidArgument("LAN peer has no reachable address".into())
-                })?;
+                if target_peer.addresses.is_empty() {
+                    return Err(FfiError::InvalidArgument(
+                        "LAN peer has no reachable address".into(),
+                    ));
+                }
+                let target_addrs = target_peer.addresses;
 
                 let ep = Arc::clone(&self.endpoint);
                 let tx = self.events_tx.clone();
@@ -625,7 +635,7 @@ impl VeloceEngine {
                         connection_type: ConnectionType::Lan.as_str().into(),
                     });
                     match ep
-                        .push_to_peer(Some(target_id), target_addr, src, ConnectionType::Lan)
+                        .push_to_peer_addrs(Some(target_id), &target_addrs, src, ConnectionType::Lan)
                         .await
                     {
                         Ok(summary) => {
@@ -692,7 +702,8 @@ impl VeloceEngine {
                 },
             );
 
-        self.spawn_join_task(transfer_id.clone(), ticket, out_dir, streams);
+        let cancel = self.endpoint.prepare_transfer_cancellation(&transfer_id);
+        self.spawn_join_task(transfer_id.clone(), ticket, out_dir, streams, cancel);
 
         Ok(JoinSessionResultDto {
             transfer_id,
@@ -707,6 +718,7 @@ impl VeloceEngine {
         ticket: SessionTicket,
         out_dir: PathBuf,
         streams: usize,
+        cancel: CancellationToken,
     ) {
         let ep = Arc::clone(&self.endpoint);
         let tx = self.events_tx.clone();
@@ -714,7 +726,10 @@ impl VeloceEngine {
         let tid = transfer_id;
 
         tokio::spawn(async move {
-            match ep.join_session(&ticket, out_dir, Some(streams)).await {
+            match ep
+                .join_session_with_cancel(&ticket, out_dir, Some(streams), cancel)
+                .await
+            {
                 Ok(summary) => {
                     managed
                         .lock()
@@ -824,11 +839,13 @@ impl VeloceEngine {
         if let (Some(ticket_code), Some(out_dir)) = (resume_plan.ticket_code, resume_plan.output_dir)
         {
             let ticket = SessionTicket::decode(&ticket_code)?;
+            let cancel = self.endpoint.prepare_transfer_cancellation(transfer_id);
             self.spawn_join_task(
                 transfer_id.to_string(),
                 ticket,
                 out_dir,
                 resume_plan.parallel_streams,
+                cancel,
             );
             return Ok(true);
         }

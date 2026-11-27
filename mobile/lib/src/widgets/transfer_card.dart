@@ -160,7 +160,8 @@ class TransferCard extends StatelessWidget {
                           ),
                           const SizedBox(width: 4),
                           Text(
-                            '${item.chunksVerified}/${item.totalChunks} chunks',
+                            '${item.chunksVerified}/${item.totalChunks} chunks'
+                            '${item.initialChunksVerified > 0 ? ' (${item.initialChunksVerified} resumed)' : ''}',
                             style: Theme.of(context)
                                 .textTheme
                                 .labelSmall

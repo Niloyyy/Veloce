@@ -5,7 +5,7 @@ use std::time::Duration;
 use core_protocol::{NodeId, TransferProfile, ALPN_VELOCE};
 use quinn::congestion::BbrConfig;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::{ClientConfig, IdleTimeout, ServerConfig, TransportConfig};
+use quinn::{ClientConfig, IdleTimeout, MtuDiscoveryConfig, ServerConfig, TransportConfig};
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ED25519};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring::default_provider;
@@ -112,7 +112,7 @@ impl PeerIdentity {
 
     /// Builds a QUIC `ServerConfig` enforcing mutual TLS 1.3 with Ed25519 peer identities and BBR.
     pub fn build_server_config(&self, transport: Arc<TransportConfig>) -> Result<ServerConfig> {
-        let provider = Arc::new(default_provider());
+        let provider = fast_crypto_provider();
         let verifier = Arc::new(Ed25519PeerVerifier::new(None, provider.signature_verification_algorithms));
 
         let mut tls = rustls::ServerConfig::builder_with_provider(provider)
@@ -141,7 +141,7 @@ impl PeerIdentity {
         expected_peer: Option<NodeId>,
         transport: Arc<TransportConfig>,
     ) -> Result<ClientConfig> {
-        let provider = Arc::new(default_provider());
+        let provider = fast_crypto_provider();
         let verifier = Arc::new(Ed25519PeerVerifier::new(
             expected_peer,
             provider.signature_verification_algorithms,
@@ -163,6 +163,66 @@ impl PeerIdentity {
         client_config.transport_config(transport);
         Ok(client_config)
     }
+
+    /// Builds a `rustls::ServerConfig` for the high-throughput LAN TCP data lane enforcing
+    /// mutual TLS 1.3 with Ed25519 peer certificate authentication and `AES-128-GCM`.
+    pub fn build_lan_tls_server_config(&self) -> Result<Arc<rustls::ServerConfig>> {
+        let provider = fast_crypto_provider();
+        let verifier = Arc::new(Ed25519PeerVerifier::new(
+            None,
+            provider.signature_verification_algorithms,
+        ));
+
+        let mut tls = rustls::ServerConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(|e| TransportError::Tls(e.to_string()))?
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(vec![self.cert_der()], self.private_key_der())
+            .map_err(|e| TransportError::Tls(e.to_string()))?;
+
+        tls.alpn_protocols = vec![b"veloce-lan/1".to_vec()];
+        Ok(Arc::new(tls))
+    }
+
+    /// Builds a `rustls::ClientConfig` for the high-throughput LAN TCP data lane verifying
+    /// that the remote server possesses the Ed25519 private key for `expected_peer`.
+    pub fn build_lan_tls_client_config(
+        &self,
+        expected_peer: NodeId,
+    ) -> Result<Arc<rustls::ClientConfig>> {
+        let provider = fast_crypto_provider();
+        let verifier = Arc::new(Ed25519PeerVerifier::new(
+            Some(expected_peer),
+            provider.signature_verification_algorithms,
+        ));
+
+        let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(|e| TransportError::Tls(e.to_string()))?
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_client_auth_cert(vec![self.cert_der()], self.private_key_der())
+            .map_err(|e| TransportError::Tls(e.to_string()))?;
+
+        tls.alpn_protocols = vec![b"veloce-lan/1".to_vec()];
+        Ok(Arc::new(tls))
+    }
+}
+
+/// Shared TLS 1.3 `CryptoProvider` prioritizing `AES-128-GCM` (10 AES rounds vs 14 in `AES-256-GCM`,
+/// ~35% higher hardware AES-NI / ARMv8-CE throughput per packet) followed by `ChaCha20-Poly1305`.
+fn fast_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    static PROVIDER: std::sync::OnceLock<Arc<rustls::crypto::CryptoProvider>> =
+        std::sync::OnceLock::new();
+    Arc::clone(PROVIDER.get_or_init(|| {
+        let mut provider = default_provider();
+        provider.cipher_suites = vec![
+            rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
+            rustls::crypto::ring::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+            rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
+        ];
+        Arc::new(provider)
+    }))
 }
 
 /// Constructs a high-throughput QUIC `TransportConfig` using BBR congestion control
@@ -172,7 +232,7 @@ pub fn build_bbr_transport_config() -> Result<Arc<TransportConfig>> {
 }
 
 /// Constructs a QUIC `TransportConfig` using BBR congestion control tuned for `TransferProfile`
-/// (64 MiB desktop windows vs bounded 8 MiB mobile windows to prevent iOS Jetsam OOMs).
+/// (128 MiB desktop windows vs 32 MiB mobile windows, greedy GSO stream packing, and DPLPMTUD up to 1452B).
 pub fn build_bbr_transport_config_for_profile(
     profile: TransferProfile,
 ) -> Result<Arc<TransportConfig>> {
@@ -185,9 +245,13 @@ pub fn build_bbr_transport_config_for_profile(
     cfg.receive_window(profile.quic_receive_window().into());
     cfg.stream_receive_window(profile.quic_stream_receive_window().into());
     cfg.send_window(profile.quic_send_window());
-    // 1380-byte initial MTU maximizes payload efficiency while still leaving headroom for
-    // RelayForward framing (~76B) inside standard 1500-byte Ethernet MTU without fragmentation.
+    // Pack contiguous chunk frames greedily into GSO segments instead of fragmenting across streams.
+    cfg.send_fairness(false);
+    // Start safely at 1380B (fits RelayForward encapsulation) and probe up to 1452B on direct IPv4/IPv6 Wi-Fi/LAN.
     cfg.initial_mtu(1380);
+    let mut mtu_discovery = MtuDiscoveryConfig::default();
+    mtu_discovery.upper_bound(1452);
+    cfg.mtu_discovery_config(Some(mtu_discovery));
     cfg.keep_alive_interval(Some(Duration::from_secs(5)));
     let idle = IdleTimeout::try_from(Duration::from_secs(45))
         .map_err(|e| TransportError::Tls(format!("invalid idle timeout: {e}")))?;

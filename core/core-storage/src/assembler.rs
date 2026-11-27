@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use core_protocol::{validate_relative_path, TransferManifest};
 use serde::{Deserialize, Serialize};
 
@@ -40,9 +41,11 @@ pub struct ChunkWriteOutcome {
 struct TargetFile {
     final_path: PathBuf,
     part_path: PathBuf,
-    file: File,
+    file: Option<File>,
     size: u64,
     mode: Option<u32>,
+    existed_before_open: bool,
+    already_finalized: bool,
 }
 
 /// Out-of-order, content-verified, resumable multi-file chunk assembler.
@@ -71,6 +74,7 @@ impl ChunkAssembler {
 
         let root_prefix = hex::encode(&manifest.merkle_root[..8]);
         let state_path = output_dir.join(format!(".veloce-resume-{root_prefix}.state"));
+        let state_existed = state_path.exists();
 
         // Attempt to load persisted resume bitfield.
         let mut bitfield = match Self::load_resume_state(&state_path, &manifest) {
@@ -82,6 +86,8 @@ impl ChunkAssembler {
             }
         };
 
+        let mut any_part_existed = false;
+        let mut any_finalized_existed = false;
         let mut targets = Vec::with_capacity(manifest.files.len());
         for entry in &manifest.files {
             let safe_rel = validate_relative_path(&entry.relative_path)?;
@@ -102,6 +108,25 @@ impl ChunkAssembler {
                 .parent()
                 .unwrap_or(&output_dir)
                 .join(part_name);
+            let existed_before_open = part_path.exists();
+            if existed_before_open {
+                any_part_existed = true;
+            } else if verify_existing_final_file(&final_path, entry, &manifest) {
+                any_finalized_existed = true;
+                for local_idx in 0..entry.chunk_count {
+                    bitfield.set(entry.first_chunk + local_idx);
+                }
+                targets.push(TargetFile {
+                    final_path,
+                    part_path,
+                    file: None,
+                    size: entry.size,
+                    mode: entry.mode,
+                    existed_before_open: false,
+                    already_finalized: true,
+                });
+                continue;
+            }
 
             let file = OpenOptions::new()
                 .create(true)
@@ -121,15 +146,20 @@ impl ChunkAssembler {
             targets.push(TargetFile {
                 final_path,
                 part_path,
-                file,
+                file: Some(file),
                 size: entry.size,
                 mode: entry.mode,
+                existed_before_open,
+                already_finalized: false,
             });
         }
 
-        // Verify any chunks marked in the loaded bitfield AND deduplicate already-present valid chunks
-        // on disk (handles abrupt crashes before state persistence).
-        reconcile_disk_chunks(&manifest, &targets, &mut bitfield)?;
+        // Only scan `.part` files on disk when resuming an existing partial transfer!
+        // Brand-new transfers have freshly created sparse `.part` files, so skipping reconciliation
+        // eliminates reading & hashing gigabytes of zeros before sending `ControlMessage::Accept`.
+        if state_existed || any_part_existed {
+            reconcile_disk_chunks(&manifest, &targets, &mut bitfield)?;
+        }
 
         let assembler = Self {
             manifest,
@@ -137,10 +167,13 @@ impl ChunkAssembler {
             state_path,
             targets,
             bitfield: Mutex::new(bitfield),
-            persist_every: 32,
+            persist_every: 16,
             persist_tracker: Mutex::new((0, Instant::now())),
         };
-        assembler.persist_state()?;
+        if (state_existed || any_part_existed || any_finalized_existed) && !assembler.is_complete()
+        {
+            assembler.persist_state()?;
+        }
         Ok(assembler)
     }
 
@@ -242,12 +275,14 @@ impl ChunkAssembler {
 
         // 4. Write chunk at exact offset using positional I/O (safe for concurrent out-of-order writers).
         let target = &self.targets[file_idx];
-        write_all_at_offset(&target.file, offset, data).map_err(|e| {
-            StorageError::from_io_with_path(e, target.part_path.display().to_string())
-        })?;
+        if let Some(ref file) = target.file {
+            write_all_at_offset(file, offset, data).map_err(|e| {
+                StorageError::from_io_with_path(e, target.part_path.display().to_string())
+            })?;
+        }
 
         // 5. Mark chunk verified and periodically persist resume state atomically
-        //    (every `persist_every` chunks, every 1 second, or upon final chunk).
+        //    (every `persist_every` chunks, every 500ms, or upon final chunk).
         let (newly_verified, verified_chunks, should_persist) = {
             let mut bf = self.bitfield.lock().expect("bitfield mutex poisoned");
             let newly = bf.set(chunk_index);
@@ -259,7 +294,7 @@ impl ChunkAssembler {
             tracker.0 += 1;
             let now = Instant::now();
             let persist = tracker.0 >= self.persist_every
-                || now.duration_since(tracker.1) >= Duration::from_secs(1)
+                || now.duration_since(tracker.1) >= Duration::from_millis(500)
                 || verified == self.manifest.total_chunks;
             if persist {
                 tracker.0 = 0;
@@ -285,6 +320,21 @@ impl ChunkAssembler {
         self: &Arc<Self>,
         chunk_index: u32,
         data: Vec<u8>,
+        proof: Vec<[u8; 32]>,
+    ) -> Result<ChunkWriteOutcome> {
+        let assembler = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            assembler.write_verified_chunk(chunk_index, &data, &proof)
+        })
+        .await
+        .map_err(|e| StorageError::JoinError(e.to_string()))?
+    }
+
+    /// Zero-copy `Bytes` async wrapper for writing and verifying QUIC-received chunks.
+    pub async fn write_verified_chunk_bytes_async(
+        self: &Arc<Self>,
+        chunk_index: u32,
+        data: Bytes,
         proof: Vec<[u8; 32]>,
     ) -> Result<ChunkWriteOutcome> {
         let assembler = Arc::clone(self);
@@ -343,9 +393,15 @@ impl ChunkAssembler {
 
         let mut finalized_paths = Vec::with_capacity(self.targets.len());
         for target in &self.targets {
-            target.file.sync_all().map_err(|e| {
-                StorageError::from_io_with_path(e, target.part_path.display().to_string())
-            })?;
+            if target.already_finalized {
+                finalized_paths.push(target.final_path.clone());
+                continue;
+            }
+            if let Some(ref file) = target.file {
+                file.sync_all().map_err(|e| {
+                    StorageError::from_io_with_path(e, target.part_path.display().to_string())
+                })?;
+            }
             #[cfg(unix)]
             if let Some(mode) = target.mode {
                 use std::os::unix::fs::PermissionsExt;
@@ -405,6 +461,41 @@ impl ChunkAssembler {
     }
 }
 
+/// Checks whether `final_path` already exists on disk with the exact byte length and BLAKE3 chunk
+/// hashes specified in `manifest`, enabling instant zero-retransmission deduplication across new sessions.
+fn verify_existing_final_file(
+    final_path: &Path,
+    entry: &core_protocol::FileEntry,
+    manifest: &TransferManifest,
+) -> bool {
+    let Ok(meta) = fs::metadata(final_path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() != entry.size {
+        return false;
+    }
+    if entry.chunk_count == 0 {
+        return true;
+    }
+    let Ok(mut reader) = File::open(final_path) else {
+        return false;
+    };
+    let mut buf = vec![0u8; manifest.chunk_size as usize];
+    for local_idx in 0..entry.chunk_count {
+        let chunk_index = entry.first_chunk + local_idx;
+        let offset = (local_idx as u64) * (manifest.chunk_size as u64);
+        let len = entry.size.saturating_sub(offset).min(manifest.chunk_size as u64) as usize;
+        let slice = &mut buf[..len];
+        if reader.read_exact(slice).is_err() {
+            return false;
+        }
+        if MerkleTree::hash_chunk_data(slice) != manifest.chunk_hashes[chunk_index as usize] {
+            return false;
+        }
+    }
+    true
+}
+
 /// Scans existing `.part` files on disk to verify marked bits and salvage any valid chunks
 /// written prior to an ungraceful shutdown.
 fn reconcile_disk_chunks(
@@ -413,11 +504,24 @@ fn reconcile_disk_chunks(
     bitfield: &mut ChunkBitfield,
 ) -> Result<()> {
     let mut buf = vec![0u8; manifest.chunk_size as usize];
+    let full_zero_hash = MerkleTree::hash_chunk_data(&buf);
     for (file_idx, entry) in manifest.files.iter().enumerate() {
         if entry.chunk_count == 0 {
             continue;
         }
         let target = &targets[file_idx];
+        if target.already_finalized {
+            for local_idx in 0..entry.chunk_count {
+                bitfield.set(entry.first_chunk + local_idx);
+            }
+            continue;
+        }
+        if !target.existed_before_open {
+            for local_idx in 0..entry.chunk_count {
+                bitfield.clear(entry.first_chunk + local_idx);
+            }
+            continue;
+        }
         let mut reader = File::open(&target.part_path)?;
         for local_idx in 0..entry.chunk_count {
             let chunk_index = entry.first_chunk + local_idx;
@@ -431,9 +535,20 @@ fn reconcile_disk_chunks(
                 continue;
             }
 
-            // Skip hashing all-zero uninitialized sparse chunks unless bitfield claimed it was set
-            // or the expected hash actually matches all zeros.
+            // Fast-skip uninitialized sparse zero blocks when the saved bitfield says unset.
             let expected = manifest.chunk_hashes[chunk_index as usize];
+            if !bitfield.is_set(chunk_index) && slice.iter().all(|&b| b == 0) {
+                let zero_hash = if len == manifest.chunk_size as usize {
+                    full_zero_hash
+                } else {
+                    MerkleTree::hash_chunk_data(slice)
+                };
+                if zero_hash == expected {
+                    bitfield.set(chunk_index);
+                }
+                continue;
+            }
+
             let actual = MerkleTree::hash_chunk_data(slice);
             if actual == expected {
                 bitfield.set(chunk_index);

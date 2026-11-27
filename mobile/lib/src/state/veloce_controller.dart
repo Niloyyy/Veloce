@@ -65,6 +65,7 @@ class TransferItem {
     required this.speedBytesPerSec,
     required this.etaSeconds,
     required this.connectionType,
+    this.initialChunksVerified = 0,
     this.elapsedMs = 0,
     this.error,
     this.outputPaths = const [],
@@ -80,6 +81,7 @@ class TransferItem {
   final int totalBytes;
   final int chunksVerified;
   final int totalChunks;
+  final int initialChunksVerified;
   final double speedBytesPerSec;
   final double etaSeconds;
   final String connectionType;
@@ -107,6 +109,7 @@ class TransferItem {
         'totalBytes': totalBytes,
         'chunksVerified': chunksVerified,
         'totalChunks': totalChunks,
+        'initialChunksVerified': initialChunksVerified,
         'speedBytesPerSec': speedBytesPerSec,
         'etaSeconds': etaSeconds,
         'connectionType': connectionType,
@@ -135,6 +138,7 @@ class TransferItem {
       totalBytes: (json['totalBytes'] as num?)?.toInt() ?? 0,
       chunksVerified: (json['chunksVerified'] as num?)?.toInt() ?? 0,
       totalChunks: (json['totalChunks'] as num?)?.toInt() ?? 0,
+      initialChunksVerified: (json['initialChunksVerified'] as num?)?.toInt() ?? 0,
       speedBytesPerSec: (json['speedBytesPerSec'] as num?)?.toDouble() ?? 0,
       etaSeconds: 0,
       connectionType: json['connectionType'] as String? ?? 'LAN',
@@ -159,6 +163,7 @@ class TransferItem {
     int? totalBytes,
     int? chunksVerified,
     int? totalChunks,
+    int? initialChunksVerified,
     double? speedBytesPerSec,
     double? etaSeconds,
     String? connectionType,
@@ -178,6 +183,7 @@ class TransferItem {
       totalBytes: totalBytes ?? this.totalBytes,
       chunksVerified: chunksVerified ?? this.chunksVerified,
       totalChunks: totalChunks ?? this.totalChunks,
+      initialChunksVerified: initialChunksVerified ?? this.initialChunksVerified,
       speedBytesPerSec: speedBytesPerSec ?? this.speedBytesPerSec,
       etaSeconds: etaSeconds ?? this.etaSeconds,
       connectionType: connectionType ?? this.connectionType,
@@ -290,10 +296,15 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   );
 
   String _detectedDeviceName = '';
+  VeloceThemeId? _previewThemeId;
   AppNodeInfo? _nodeInfo;
   String? _initError;
   String? _actionError;
   bool _busy = false;
+  final List<String> _selectedPaths = [];
+  List<String> _lastWifiAddrs = const [];
+  Timer? _wifiWatchTimer;
+  bool _pollingWifi = false;
   final Map<String, AppPeer> _peers = {};
   final Map<String, TrustedPeer> _trustedPeers = {};
   final Map<String, TransferItem> _transfers = {};
@@ -311,7 +322,9 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   VeloceSettings get settings => _settings;
+  VeloceThemeId get activeThemeId => _previewThemeId ?? _settings.effectiveThemeId;
   String get detectedDeviceName => _detectedDeviceName;
+  List<String> get selectedPaths => List.unmodifiable(_selectedPaths);
   AppNodeInfo? get nodeInfo => _nodeInfo;
   String? get initError => _initError;
   String? get actionError => _actionError;
@@ -363,6 +376,78 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     await _loadSettingsAndHistory();
     await _startEngine();
+    _startWifiChangeWatcher();
+  }
+
+  void _startWifiChangeWatcher() {
+    _wifiWatchTimer?.cancel();
+    if (!Platform.isAndroid && !Platform.isIOS) return;
+    _wifiWatchTimer = Timer.periodic(const Duration(milliseconds: 1100), (_) {
+      unawaited(_checkWifiTransitions());
+    });
+  }
+
+  Future<void> _checkWifiTransitions() async {
+    if (_disposed || _pollingWifi) return;
+    _pollingWifi = true;
+    try {
+      final current = List<String>.from(await _platform.getLocalWifiAddresses())..sort();
+      final prev = _lastWifiAddrs;
+      final same = current.length == prev.length &&
+          List.generate(current.length, (i) => current[i] == prev[i]).every((v) => v);
+      if (same) return;
+
+      _lastWifiAddrs = current;
+      if (current.isEmpty && _peers.isNotEmpty) {
+        // Switched to Mobile Data / turned off Wi-Fi: drop stale LAN peers immediately!
+        _peers.clear();
+        _safeNotifyListeners();
+      }
+      if (!_busy && activeTransferCount == 0 && _activeSession == null) {
+        await _startEngine();
+      }
+    } catch (_) {
+      // Ignore transient platform channel errors.
+    } finally {
+      _pollingWifi = false;
+    }
+  }
+
+  void previewTheme(VeloceThemeId? themeId) {
+    if (_previewThemeId == themeId) return;
+    _previewThemeId = themeId;
+    _safeNotifyListeners();
+  }
+
+  void addSelectedPaths(List<String> incoming) {
+    if (incoming.isEmpty) return;
+    var changed = false;
+    for (final path in incoming) {
+      final clean = path.trim();
+      if (clean.isNotEmpty && !_selectedPaths.contains(clean)) {
+        _selectedPaths.add(clean);
+        changed = true;
+      }
+    }
+    if (changed) {
+      stopHostingSession();
+      _safeNotifyListeners();
+    }
+  }
+
+  void removeSelectedPath(String targetPath) {
+    final removed = _selectedPaths.remove(targetPath);
+    if (removed) {
+      stopHostingSession();
+      _safeNotifyListeners();
+    }
+  }
+
+  void clearSelectedPaths() {
+    if (_selectedPaths.isEmpty) return;
+    _selectedPaths.clear();
+    stopHostingSession();
+    _safeNotifyListeners();
   }
 
   Future<void> _loadSettingsAndHistory() async {
@@ -553,6 +638,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
       await _bridge.initRuntime();
       await _platform.acquireMulticastLock();
       final wifiAddrs = await _platform.getLocalWifiAddresses();
+      _lastWifiAddrs = List<String>.from(wifiAddrs)..sort();
       final downloadDir = await _resolveDownloadDir();
       final identityKeyPath = await _resolveIdentityKeyPath();
       final relays = _settings.relayHost
@@ -660,6 +746,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
       unawaited(_platform.releaseCustomSaveFolder(prevUri));
     }
 
+    _previewThemeId = null;
     _settings = sanitizedNext;
     _safeNotifyListeners();
 
@@ -866,7 +953,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
       final res = await _bridge.joinSession(
         ticketCode: ticketCode,
         outputDir: _activeReceiveOutputDir(),
-        parallelStreams: 4,
+        parallelStreams: null,
       );
       _transfers[res.transferId] = TransferItem(
         transferId: res.transferId,
@@ -1091,6 +1178,9 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           :final connectionType,
         ):
         final existing = _transfers[transferId];
+        final initialSkipped = existing != null && existing.initialChunksVerified > 0
+            ? existing.initialChunksVerified
+            : ((speedBytesPerSec == 0 && chunksVerified > 0) ? chunksVerified : 0);
         _transfers[transferId] = TransferItem(
           transferId: transferId,
           label: existing?.label ??
@@ -1103,6 +1193,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           totalBytes: totalBytes,
           chunksVerified: chunksVerified,
           totalChunks: totalChunks,
+          initialChunksVerified: initialSkipped,
           speedBytesPerSec: speedBytesPerSec,
           etaSeconds: etaSeconds,
           connectionType: connectionType,
@@ -1157,6 +1248,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
           totalBytes: totalBytes,
           chunksVerified: totalChunks,
           totalChunks: totalChunks,
+          initialChunksVerified: existing?.initialChunksVerified ?? 0,
           speedBytesPerSec: averageSpeedBytesPerSec,
           etaSeconds: 0,
           connectionType: existing?.connectionType ?? 'LAN',
@@ -1297,6 +1389,7 @@ class VeloceController extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void dispose() {
     _disposed = true;
+    _wifiWatchTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_eventSub?.cancel());
     unawaited(_platform.stopForegroundTransferService());

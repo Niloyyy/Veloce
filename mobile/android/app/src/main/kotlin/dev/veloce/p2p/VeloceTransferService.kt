@@ -7,23 +7,26 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 
 /**
- * Foreground Service holding a partial WakeLock so active QUIC (BBR) transfers
- * complete reliably when the Android screen turns off or the user switches apps.
+ * Foreground Service holding a partial CPU WakeLock AND a low-latency/high-performance
+ * Wi-Fi lock so Android's Wi-Fi chipset disables 802.11 Power Save Polling during active
+ * QUIC (BBR) transfers, keeping MIMO throughput at peak line rate.
  */
 class VeloceTransferService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
-                releaseWakeLock()
+                releaseLocks()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
@@ -32,7 +35,7 @@ class VeloceTransferService : Service() {
                 val title = intent?.getStringExtra(EXTRA_TITLE) ?: "Veloce Transfer"
                 val body = intent?.getStringExtra(EXTRA_BODY) ?: "Encrypted P2P transfer active"
                 ensureChannel()
-                acquireWakeLock()
+                acquireLocks()
                 val notification = buildNotification(title, body)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     startForeground(
@@ -77,26 +80,56 @@ class VeloceTransferService : Service() {
             .build()
     }
 
-    private fun acquireWakeLock() {
-        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
-        if (wakeLock == null) {
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "veloce:transfer-wakelock")
-                .apply { setReferenceCounted(false) }
+    private fun acquireLocks() {
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        if (pm != null) {
+            if (wakeLock == null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "veloce:transfer-wakelock")
+                    .apply { setReferenceCounted(false) }
+            }
+            if (wakeLock?.isHeld == false) {
+                // Bounded 2-hour timeout prevents stuck wakelocks on crash.
+                wakeLock?.acquire(2 * 60 * 60 * 1000L)
+            }
         }
-        if (wakeLock?.isHeld == false) {
-            // Bounded 2-hour timeout prevents stuck wakelocks on crash.
-            wakeLock?.acquire(2 * 60 * 60 * 1000L)
+
+        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        if (wm != null) {
+            if (wifiLock == null) {
+                val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifiLock = wm.createWifiLock(lockMode, "veloce:transfer-wifilock")
+                    .apply { setReferenceCounted(false) }
+            }
+            if (wifiLock?.isHeld == false) {
+                try {
+                    wifiLock?.acquire()
+                } catch (_: Exception) {
+                    // Ignore OEM permission quirks.
+                }
+            }
         }
     }
 
-    private fun releaseWakeLock() {
+    private fun releaseLocks() {
+        if (wifiLock?.isHeld == true) {
+            try {
+                wifiLock?.release()
+            } catch (_: Exception) {}
+        }
         if (wakeLock?.isHeld == true) {
-            wakeLock?.release()
+            try {
+                wakeLock?.release()
+            } catch (_: Exception) {}
         }
     }
 
     override fun onDestroy() {
-        releaseWakeLock()
+        releaseLocks()
         super.onDestroy()
     }
 

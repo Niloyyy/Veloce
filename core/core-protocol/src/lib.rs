@@ -7,8 +7,10 @@ pub mod types;
 pub use error::{ProtocolError, Result};
 pub use handshake::{HandshakeState, HandshakeStateMachine, SessionRole};
 pub use messages::{
-    read_data_frame, read_frame, write_data_frame, write_frame, ChunkErrorCode, ControlMessage,
-    DataMessage, SignalingMessage, MAX_CONTROL_FRAME_SIZE, MAX_DATA_FRAME_SIZE, SIGNALING_MAGIC,
+    encode_chunk_response_header, encode_postcard_data_frame, read_data_frame, read_frame,
+    write_data_frame, write_frame, ChunkErrorCode, ControlMessage, DataMessage, SignalingMessage,
+    ZeroCopyDataFrame, DATA_TAG_CHUNK_RESPONSE, DATA_TAG_POSTCARD_FALLBACK, MAX_CONTROL_FRAME_SIZE,
+    MAX_DATA_FRAME_SIZE, SIGNALING_MAGIC,
 };
 pub use ticket::{SessionTicket, TICKET_PREFIX};
 pub use types::{

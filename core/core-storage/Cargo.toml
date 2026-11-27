@@ -7,6 +7,7 @@ description = "BLAKE3 Merkle chunking, zero-copy file I/O, deduplication, and re
 
 [dependencies]
 blake3.workspace = true
+bytes.workspace = true
 core-protocol = { path = "../core-protocol" }
 hex.workspace = true
 memmap2.workspace = true

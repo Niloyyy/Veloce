@@ -91,11 +91,13 @@ export function App() {
     relayAddrs: [],
     parallelStreams: 8,
     theme: "dark",
+    runInBackground: true,
     trustedPeers: [],
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [peers, setPeers] = useState<PeerDto[]>([]);
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [outputDir, setOutputDir] = useState<string>("");
   const [activeSession, setActiveSession] = useState<StartSessionResult | null>(null);
   const [transfers, setTransfers] = useState<Record<string, TransferRecord>>(() =>
@@ -130,6 +132,7 @@ export function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
+    void window.veloce?.previewTheme?.(theme);
   }, [theme]);
 
   useEffect(() => {
@@ -244,10 +247,15 @@ export function App() {
               const next = { ...prev };
               for (const p of batch) {
                 const existing = next[p.transferId];
-                const history = [
-                  ...(existing?.speedHistory ?? []),
-                  p.speedBytesPerSec,
-                ].slice(-24);
+                const initialSkipped =
+                  existing?.initialChunksVerified ??
+                  (p.speedBytesPerSec === 0 && p.chunksVerified > 0
+                    ? p.chunksVerified
+                    : 0);
+                const history =
+                  p.speedBytesPerSec > 0
+                    ? [...(existing?.speedHistory ?? []), p.speedBytesPerSec].slice(-24)
+                    : (existing?.speedHistory ?? []);
                 next[p.transferId] = {
                   transferId: p.transferId,
                   label:
@@ -261,6 +269,8 @@ export function App() {
                   totalBytes: p.totalBytes,
                   chunksVerified: p.chunksVerified,
                   totalChunks: p.totalChunks,
+                  initialChunksVerified:
+                    initialSkipped > 0 ? initialSkipped : existing?.initialChunksVerified,
                   speedBytesPerSec: p.speedBytesPerSec,
                   speedHistory: history,
                   etaSeconds: p.etaSeconds,
@@ -328,6 +338,7 @@ export function App() {
               totalBytes: evt.totalBytes,
               chunksVerified: evt.totalChunks,
               totalChunks: evt.totalChunks,
+              initialChunksVerified: existing?.initialChunksVerified,
               speedBytesPerSec: evt.averageSpeedBytesPerSec,
               speedHistory: [
                 ...(existing?.speedHistory ?? []),
@@ -381,6 +392,7 @@ export function App() {
               totalBytes: existing?.totalBytes ?? 0,
               chunksVerified: existing?.chunksVerified ?? 0,
               totalChunks: existing?.totalChunks ?? 0,
+              initialChunksVerified: existing?.initialChunksVerified,
               speedBytesPerSec: 0,
               speedHistory: existing?.speedHistory ?? [],
               etaSeconds: 0,
@@ -393,10 +405,62 @@ export function App() {
     }
   };
 
+  const handleStopSharing = useCallback(async () => {
+    setActiveSession((prev) => {
+      if (prev) {
+        void window.veloce?.cancelTransfer(prev.transferId);
+      }
+      return null;
+    });
+  }, []);
+
+  const handleAddSelectedPaths = useCallback(
+    (incoming: string[]) => {
+      if (incoming.length === 0) return;
+      setSelectedPaths((prev) => {
+        const merged = [...prev];
+        let changed = false;
+        for (const p of incoming) {
+          if (p && !merged.includes(p)) {
+            merged.push(p);
+            changed = true;
+          }
+        }
+        if (changed) {
+          void handleStopSharing();
+        }
+        return changed ? merged : prev;
+      });
+    },
+    [handleStopSharing],
+  );
+
+  const handleRemoveSelectedPath = useCallback(
+    (targetPath: string) => {
+      setSelectedPaths((prev) => {
+        const next = prev.filter((p) => p !== targetPath);
+        if (next.length !== prev.length) {
+          void handleStopSharing();
+        }
+        return next;
+      });
+    },
+    [handleStopSharing],
+  );
+
+  const handleClearSelectedPaths = useCallback(() => {
+    setSelectedPaths([]);
+    void handleStopSharing();
+  }, [handleStopSharing]);
+
   const handleStartSession = async (paths: string[], targetPeerNodeId?: string) => {
+    if (paths.length === 0) return;
     setBusy(true);
     setBannerError(null);
     try {
+      if (!targetPeerNodeId && activeSession) {
+        await window.veloce?.cancelTransfer(activeSession.transferId);
+      }
       const res = await window.veloce!.startSession({
         paths,
         targetPeerNodeId,
@@ -521,17 +585,6 @@ export function App() {
     await window.veloce?.openExternalUrl(url);
   }, []);
 
-  const handleStopSharing = async () => {
-    if (!activeSession) return;
-    const tid = activeSession.transferId;
-    setActiveSession(null);
-    try {
-      await window.veloce?.cancelTransfer(tid);
-    } catch {
-      // Ignore cancellation errors.
-    }
-  };
-
   const handleJoinSession = async (ticketCode: string): Promise<boolean> => {
     setBusy(true);
     setBannerError(null);
@@ -584,12 +637,18 @@ export function App() {
     setSavingSettings(true);
     setBannerError(null);
     try {
+      const engineChanged =
+        next.deviceName !== settings.deviceName ||
+        next.parallelStreams !== settings.parallelStreams ||
+        JSON.stringify(next.relayAddrs) !== JSON.stringify(settings.relayAddrs);
       const result = await window.veloce.updateSettings(next);
       setSettings(result.settings);
       setTheme(result.settings.theme);
       setStatus(result.status);
       setOutputDir(result.settings.downloadDir);
-      setActiveSession(null);
+      if (engineChanged) {
+        setActiveSession(null);
+      }
       const refreshedPeers = await window.veloce.listLocalPeers();
       setPeers(refreshedPeers);
     } finally {
@@ -711,6 +770,7 @@ export function App() {
   };
 
   const transferList = Object.values(transfers).reverse();
+  const activeCount = transferList.filter((tr) => tr.status === "active").length;
   const hasFinishedTransfers = transferList.some(
     (tr) => tr.status === "completed" || tr.status === "failed" || tr.status === "cancelled",
   );
@@ -721,13 +781,36 @@ export function App() {
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">
-            <VeloceLogo size={36} />
+            <VeloceLogo size={34} />
           </div>
           <div>
             <h1>Veloce</h1>
-            <span className="muted-xs">QUIC (BBR) • BLAKE3 Merkle • E2EE P2P</span>
+            <span className="muted-xs">Local &amp; Global P2P</span>
           </div>
         </div>
+
+        <nav className="tab-bar" role="tablist" aria-label="Transfer mode">
+          <button
+            role="tab"
+            aria-selected={tab === "send"}
+            type="button"
+            className={`tab-btn ${tab === "send" ? "tab-active" : ""}`}
+            onClick={() => setTab("send")}
+          >
+            <ArrowUpRight size={15} />
+            <span>Send</span>
+          </button>
+          <button
+            role="tab"
+            aria-selected={tab === "receive"}
+            type="button"
+            className={`tab-btn ${tab === "receive" ? "tab-active" : ""}`}
+            onClick={() => setTab("receive")}
+          >
+            <ArrowDownLeft size={15} />
+            <span>Receive</span>
+          </button>
+        </nav>
 
         <div className="topbar-right">
           {status?.nodeInfo && (
@@ -747,7 +830,7 @@ export function App() {
             className="icon-btn"
             type="button"
             aria-label={`Switch theme (current: ${themeLabel(theme)})`}
-            title={`Theme: ${themeLabel(theme)} (click to switch)`}
+            title={`Theme: ${themeLabel(theme)} (click to cycle)`}
             onClick={handleToggleTheme}
           >
             <Palette size={16} />
@@ -781,38 +864,19 @@ export function App() {
         </div>
       )}
 
-      <nav className="tab-bar" role="tablist">
-        <button
-          role="tab"
-          aria-selected={tab === "send"}
-          type="button"
-          className={`tab-btn ${tab === "send" ? "tab-active" : ""}`}
-          onClick={() => setTab("send")}
-        >
-          <ArrowUpRight size={16} />
-          <span>Send</span>
-        </button>
-        <button
-          role="tab"
-          aria-selected={tab === "receive"}
-          type="button"
-          className={`tab-btn ${tab === "receive" ? "tab-active" : ""}`}
-          onClick={() => setTab("receive")}
-        >
-          <ArrowDownLeft size={16} />
-          <span>Receive</span>
-        </button>
-      </nav>
-
       <main className="main-grid">
         <section className="primary-column">
           {tab === "send" ? (
             <SendView
               peers={peers}
+              selectedPaths={selectedPaths}
               trustedNodeIds={trustedNodeIds}
               activeSession={activeSession}
               hasRelay={settings.relayAddrs.length > 0}
               busy={busy}
+              onAddPaths={handleAddSelectedPaths}
+              onRemovePath={handleRemoveSelectedPath}
+              onClearPaths={handleClearSelectedPaths}
               onStartSession={handleStartSession}
               onSendText={handleSendText}
               onToggleTrustPeer={handleToggleTrustPeer}
@@ -820,6 +884,7 @@ export function App() {
             />
           ) : (
             <ReceiveView
+              deviceName={status?.nodeInfo?.deviceName}
               outputDir={outputDir}
               busy={busy}
               onChangeOutputDir={handleChooseOutputDir}
@@ -831,9 +896,16 @@ export function App() {
         <aside className="telemetry-column">
           <div className="panel telemetry-panel">
             <div className="panel-header">
-              <h3>Live Transfers</h3>
+              <div className="panel-title-inline">
+                <h3>Transfers</h3>
+                {activeCount > 0 && (
+                  <span className="count-badge">{activeCount} active</span>
+                )}
+              </div>
               <div className="panel-header-actions">
-                <span className="muted-xs">{transferList.length} session(s)</span>
+                {transferList.length > 0 && (
+                  <span className="muted-xs">{transferList.length} total</span>
+                )}
                 {hasFinishedTransfers && (
                   <button
                     className="btn-secondary btn-sm"
@@ -842,17 +914,20 @@ export function App() {
                     onClick={handleClearHistory}
                   >
                     <Trash2 size={13} />
-                    <span>Clear History</span>
+                    <span>Clear</span>
                   </button>
                 )}
               </div>
             </div>
 
             {transferList.length === 0 ? (
-              <p className="muted-sm empty-telemetry">
-                Active transfers will stream real-time MB/s throughput, ETA, BLAKE3 chunk
-                verification, and connection path badges here.
-              </p>
+              <div className="empty-telemetry-box">
+                <p className="muted-sm">No transfers yet</p>
+                <span className="muted-xs">
+                  Live throughput, missing-chunk resume progress, and BLAKE3 verification appear
+                  here automatically.
+                </span>
+              </div>
             ) : (
               <div className="transfer-list">
                 {transferList.map((tr) => (
@@ -889,9 +964,13 @@ export function App() {
           settings={settings}
           detectedDeviceName={status?.detectedDeviceName}
           saving={savingSettings}
+          onPreviewTheme={(nextTheme) => setTheme(nextTheme)}
           onBrowseDownloadDir={async () => (await window.veloce?.pickOutputDir()) ?? null}
           onSave={handleSaveSettings}
-          onClose={() => setSettingsOpen(false)}
+          onClose={() => {
+            setTheme(settings.theme);
+            setSettingsOpen(false);
+          }}
         />
       )}
     </div>

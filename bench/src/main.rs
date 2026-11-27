@@ -294,11 +294,11 @@ async fn bench_multistream_quic_bbr(
 
     let hosted = sender.host_session(source.clone(), vec![sender.listen_addr()], vec![])?;
 
-    let (dial_addr, proxy) = if let Some(p) = profile {
+    let (dial_addr, conn_type, proxy) = if let Some(p) = profile {
         let proxy = ImpairedUdpProxy::start(sender.listen_addr(), p).await?;
-        (proxy.proxy_addr(), Some(proxy))
+        (proxy.proxy_addr(), ConnectionType::DirectP2p, Some(proxy))
     } else {
-        (sender.listen_addr(), None)
+        (sender.listen_addr(), ConnectionType::Lan, None)
     };
 
     let start = Instant::now();
@@ -308,7 +308,7 @@ async fn bench_multistream_quic_bbr(
             dial_addr,
             dst_dir.path().to_path_buf(),
             streams,
-            ConnectionType::DirectP2p,
+            conn_type,
         )
         .await?;
     let total_elapsed = start.elapsed();

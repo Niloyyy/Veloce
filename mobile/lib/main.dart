@@ -88,7 +88,7 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
     return ListenableBuilder(
       listenable: _controller,
       builder: (context, _) {
-        final activeTheme = _controller.settings.effectiveThemeId;
+        final activeTheme = _controller.activeThemeId;
         return MaterialApp(
           title: 'Veloce',
           debugShowCheckedModeBanner: false,
@@ -106,11 +106,12 @@ class _VeloceMobileAppState extends State<VeloceMobileApp> {
                       detectedDeviceName: _controller.detectedDeviceName,
                       trustedPeers: _controller.trustedPeers,
                       onUntrustPeer: _controller.untrustPeer,
+                      onPreviewTheme: _controller.previewTheme,
                       onSave: _controller.updateSettings,
                       onPickSaveFolder: _controller.pickSaveFolderOnly,
                     ),
                   ),
-                );
+                ).whenComplete(() => _controller.previewTheme(null));
               }
 
               return Scaffold(

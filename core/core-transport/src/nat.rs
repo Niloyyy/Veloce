@@ -389,6 +389,39 @@ impl NatCoordinator {
         result
     }
 
+    /// Sends a single lightweight unicast `HolePunchProbe` across `candidates` and awaits a
+    /// `HolePunchAck` within `timeout`. Used for sub-second LAN peer liveness checks.
+    pub async fn probe_peer_once(
+        &self,
+        target_node_id: NodeId,
+        candidates: &[SocketAddr],
+        timeout: Duration,
+    ) -> Option<SocketAddr> {
+        if candidates.is_empty() || self.socket.is_force_relay() {
+            return None;
+        }
+        let (tx, rx) = oneshot::channel();
+        self.pending_punches
+            .lock()
+            .expect("pending_punches lock poisoned")
+            .entry(target_node_id)
+            .or_default()
+            .push(tx);
+
+        let probe = SignalingMessage::HolePunchProbe {
+            tx_id: rand::thread_rng().next_u64(),
+            sender_node_id: self.local_node_id,
+        };
+        for &addr in candidates.iter().take(4) {
+            let _ = self.socket.send_signaling(addr, &probe).await;
+        }
+
+        tokio::time::timeout(timeout, rx)
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+    }
+
     /// Spawns a background task continuously attempting to upgrade a `Relayed` peer to `DirectP2p`.
     pub fn spawn_background_upgrade(
         self: &Arc<Self>,

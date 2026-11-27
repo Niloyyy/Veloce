@@ -51,8 +51,8 @@ export function QrCodeCard({ session, hasRelay, onStopSharing }: QrCodeCardProps
     <div className="ticket-card">
       <div className="ticket-header">
         <div className="ticket-title-row">
-          <QrCode size={16} />
-          <h3>Global Session Ticket</h3>
+          <QrCode size={16} className="accent-icon" />
+          <h3>Global Transfer Ready — Share Code or Scan QR</h3>
         </div>
         <div className="ticket-header-actions">
           <span className="merkle-pill">
@@ -66,7 +66,7 @@ export function QrCodeCard({ session, hasRelay, onStopSharing }: QrCodeCardProps
             onClick={onStopSharing}
           >
             <Square size={12} />
-            <span>Stop</span>
+            <span>Stop Sharing</span>
           </button>
         </div>
       </div>
@@ -74,7 +74,7 @@ export function QrCodeCard({ session, hasRelay, onStopSharing }: QrCodeCardProps
       <div className="ticket-body">
         <div className="qr-frame">
           {qrDataUrl ? (
-            <img src={qrDataUrl} alt="Global Session QR Code" width={164} height={164} />
+            <img src={qrDataUrl} alt="Global Session QR Code" width={156} height={156} />
           ) : (
             <div className="qr-placeholder">Generating QR...</div>
           )}
@@ -82,11 +82,12 @@ export function QrCodeCard({ session, hasRelay, onStopSharing }: QrCodeCardProps
 
         <div className="ticket-meta">
           <p className="muted-sm">
-            Share this ephemeral code or scan the QR code on Veloce Mobile. Veloce connects over
-            LAN, STUN Direct P2P, or your configured end-to-end encrypted relay.
+            1. Copy the code below (or scan the QR on Veloce Mobile) • 2. Receiver opens{" "}
+            <strong>Receive</strong> &amp; pastes the code • 3. Keep Veloce open (or in tray) while
+            streaming.
           </p>
           <div className="ticket-stats">
-            <span>{session.fileCount} file(s)</span>
+            <span>{session.fileCount} item(s)</span>
             <span>•</span>
             <span>{formatBytes(session.totalSize)}</span>
             <span>•</span>
@@ -94,9 +95,9 @@ export function QrCodeCard({ session, hasRelay, onStopSharing }: QrCodeCardProps
           </div>
           <div className="ticket-code-box">
             <code className="ticket-code-text">{session.ticketCode}</code>
-            <button className="btn-secondary btn-sm" onClick={handleCopy} type="button">
+            <button className="btn-primary btn-sm" onClick={handleCopy} type="button">
               {copied ? <Check size={14} /> : <Copy size={14} />}
-              <span>{copied ? "Copied" : "Copy"}</span>
+              <span>{copied ? "Copied!" : "Copy Code"}</span>
             </button>
           </div>
           {!hasRelay && (
